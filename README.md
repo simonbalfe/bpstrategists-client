@@ -12,9 +12,25 @@ Two entry points:
 
 Reads from `./.env`:
 
-- `BP_SESSION` — full `Cookie:` header from a logged-in browser session.
-- `BP_USER_ID` — numeric user id from the dashboard URL.
-- `BP_TOKEN` — placeholder is fine; the client refreshes the CSRF token from `/dashboard` on first use.
+- `BP_SESSION` — `Cookie:` header for `bpstrategists.agencydashboard.io` (at minimum `XSRF-TOKEN` + `agency_dashboard_session`).
+- `BP_TOKEN` — CSRF token from `<meta name="csrf-token">`. Placeholder is fine; the client refreshes it from `/dashboard` on first use.
+- `BP_USER_ID` — numeric user id (stable per account, set once).
+
+Laravel rolls the session ~daily, so the cookies expire. To refresh:
+
+```
+# one-time
+echo 'BP_EMAIL=you@example.com'  >> .env
+echo 'BP_PASSWORD=...'           >> .env
+
+# whenever you start hitting 401s
+bun run login
+```
+
+`scripts/login.ts` hits `agencydashboard.io/ajax-do-login`, follows the SSO bridge
+onto the `bpstrategists.agencydashboard.io` subdomain, and writes the fresh
+`BP_TOKEN` + `BP_SESSION` back to `.env`. After running it, reconnect the MCP
+server (`/mcp` in Claude Code) so the running process picks up the new env.
 
 ## Tools
 

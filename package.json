@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "bun run example.ts",
-    "mcp": "bun run mcp.ts"
+    "mcp": "bun run mcp.ts",
+    "login": "bun run scripts/login.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
