@@ -171,6 +171,50 @@ server.tool(
   },
 );
 
+server.tool(
+  'list_gmb_channels',
+  [
+    'List GMB locations (channels) connected to a campaign via a given Google account.',
+    'Each returned id is the channelId required by schedule_gmb_post.',
+    'Returns [] if the account has GMB connected but no locations chosen for this campaign,',
+    'or if GMB is not connected at all on this campaign.',
+  ].join(' '),
+  {
+    googleAccount: z
+      .string()
+      .describe('Gmail address from list_google_accounts (e.g. "info@bpstrategists.com").'),
+    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
+  },
+  async ({ googleAccount, campaignId }) => {
+    const emails = await client.listGa4Emails(client.userId);
+    const email = emails.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+    if (!email) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Account "${googleAccount}" not connected. Available: ${emails.map((e) => e.label).join(', ')}`,
+          },
+        ],
+      };
+    }
+    const channels = await client.listGmbAccounts(email.id, campaignId);
+    return { content: [{ type: 'text', text: JSON.stringify(channels, null, 2) }] };
+  },
+);
+
+server.tool(
+  'get_encrypted_campaign_id',
+  'Resolve a numeric campaign id to the encrypted Laravel token needed by schedule_gmb_post and list_gmb_posts.',
+  {
+    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
+  },
+  async ({ campaignId }) => {
+    const token = await client.getEncryptedCampaignId(campaignId);
+    return { content: [{ type: 'text', text: token }] };
+  },
+);
+
 // --- GMB social posting (agency dashboard) ---
 
 server.tool(

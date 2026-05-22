@@ -365,6 +365,27 @@ export class BpStrategistsClient {
     return parseOptions(html);
   }
 
+  /**
+   * GMB locations (the "channels" you can post to) under a given OAuth account.
+   * Each option's value is the channelId expected by scheduleGmbPost.
+   */
+  async listGmbAccounts(email: number, campaignId: number): Promise<GoogleAccountOption[]> {
+    const html = await this.getString(`/ajax_get_gmb_accounts?email=${email}&campaign_id=${campaignId}`);
+    return parseOptions(html);
+  }
+
+  /**
+   * Resolve the encrypted Laravel campaignId (the long base64 token) from the
+   * numeric campaign id. scheduleGmbPost and listGmbPosts both require this
+   * encrypted form. Scrapes it from the GMB tab HTML, which embeds it inline.
+   */
+  async getEncryptedCampaignId(numericCampaignId: number): Promise<string> {
+    const html = await this.getString(`/campaign_gmb_content/${numericCampaignId}`);
+    const m = html.match(/eyJ[A-Za-z0-9+/=]{50,}/);
+    if (!m) throw new Error(`Could not locate encrypted campaign token in /campaign_gmb_content/${numericCampaignId}`);
+    return m[0];
+  }
+
   // -------- Project creation flow --------
 
   async storeProjectInfo(input: StoreProjectInfoInput): Promise<StoreProjectInfoResponse> {
