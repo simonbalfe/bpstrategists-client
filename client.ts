@@ -1,3 +1,4 @@
+import { Impit } from 'impit';
 import { resolveCountry } from './locations.ts';
 
 const BASE_URL = 'https://bpstrategists.agencydashboard.io';
@@ -122,12 +123,33 @@ export type StoreRankingDetailsResponse = {
   /** Encrypted Laravel campaign id (long base64 token). */
   projectId?: string;
   keyword?: 'true' | 'false';
-  keyword_field?: string;
-  /** Region code derived from search engine, e.g. "uk". Needed by bindKeywords. */
+  /** Keywords the server accepted, echoed back for the bind step. */
+  keyword_field?: string[];
+  /** Search engine domain echoed back, e.g. "google.co.uk". */
   region?: string;
-  /** Tag id assigned to this keyword set. Needed by bindKeywords. */
+  /** Tag id assigned to this keyword set. Required by bindNewProjectKeywords. */
   tag_id?: number | string;
   ignore_local_listing?: string | number;
+};
+
+export type BindNewProjectKeywordsInput = {
+  projectId: number;
+  /** Pass response.keyword_field from storeRankingDetails. */
+  finalKeywords: string[];
+  /** Pass response.region from storeRankingDetails. */
+  region: string;
+  /** Pass response.ignore_local_listing from storeRankingDetails. */
+  ignoreLocalListing: 0 | 1 | 2;
+  /** Pass response.tag_id from storeRankingDetails. */
+  tagId: number | string;
+  /** Same location set that was sent to storeRankingDetails. */
+  locations: SearchLocation[];
+};
+
+export type BindNewProjectKeywordsResponse = {
+  status: 0 | 1 | '0' | '1';
+  message?: string;
+  project_id?: string;
 };
 
 
@@ -271,12 +293,17 @@ export class BpStrategistsClient {
   private readonly cookies = new Map<string, string>();
   /** Have we fetched at least one HTML page to ensure the CSRF token matches the current session? */
   private primed = false;
+  /** Chrome-impersonating HTTP client. Some endpoints (notably the wizard's
+   * /ajax_store_ranking_details) silently no-op writes when the request doesn't
+   * look like it came from a real Chrome browser — TLS fingerprint included. */
+  private readonly http: Impit;
   readonly userId: number;
 
   constructor(config: ClientConfig) {
     this.token = config.token;
     this.userId = config.userId;
     this.baseUrl = config.baseUrl ?? BASE_URL;
+    this.http = new Impit({ browser: 'chrome' });
     for (const [k, v] of parseCookieHeader(config.sessionCookie)) {
       this.cookies.set(k, v);
     }
@@ -303,6 +330,15 @@ export class BpStrategistsClient {
 
   async checkDomainName(name: string, userId: number): Promise<unknown> {
     return this.getJson(`/checkDomainName?search=${encodeURIComponent(name)}&user_id=${userId}`);
+  }
+
+  /** Move a campaign to the archived list. Frees a project slot. */
+  async archiveCampaign(campaignId: number): Promise<{ status: number | string; message?: string }> {
+    const body = new URLSearchParams({
+      request_id: campaignId.toString(),
+      _token: this.token,
+    });
+    return this.postJson('/ajax_archive_campaign', body);
   }
 
   async checkDnsRecord(domain: string, userId: number): Promise<unknown> {
@@ -371,6 +407,12 @@ export class BpStrategistsClient {
     throw lastErr;
   }
 
+  /**
+   * Wizard step 3a: create the project's keyword shell + tag.
+   * Returns status:1 and a tag_id but does NOT persist keyword rows on its own —
+   * the wizard's success handler then fires bindNewProjectKeywords (step 3b)
+   * which is what actually writes the keywords. See add_new_project.js:807-825.
+   */
   async storeRankingDetails(input: StoreRankingDetailsInput): Promise<StoreRankingDetailsResponse> {
     const body = new URLSearchParams();
     body.set('_token', this.token);
@@ -396,6 +438,37 @@ export class BpStrategistsClient {
     return res;
   }
 
+
+  /**
+   * Wizard step 3b: bind the keywords created by storeRankingDetails to the project.
+   * Posts the same location set + the tag_id returned by step 3a. The wizard JS
+   * fires this from inside the storeRankingDetails success callback, then does
+   * `window.location.href = '/dashboard'` on the next line — which is why this
+   * call never appears in browser HAR exports.
+   */
+  async bindNewProjectKeywords(input: BindNewProjectKeywordsInput): Promise<BindNewProjectKeywordsResponse> {
+    const body = new URLSearchParams();
+    body.set('_token', this.token);
+    body.set('project_id', input.projectId.toString());
+    for (const kw of input.finalKeywords) body.append('finalKeywords[]', kw);
+    body.set('ignore_local_listing', input.ignoreLocalListing.toString());
+    body.set('region', input.region);
+    for (const loc of input.locations) {
+      body.append('dfs_locations[]', loc.searchLocation);
+      body.append('lat[]', loc.latitude.toString());
+      body.append('long[]', loc.longitude.toString());
+      body.append('locations[]', loc.country);
+    }
+    body.set('tag_id', input.tagId.toString());
+    const res = await this.postJson<BindNewProjectKeywordsResponse>(
+      '/new_project_ajax_send_dfs_request',
+      body,
+    );
+    if (res.status !== 1 && res.status !== '1') {
+      throw new Error(`new_project_ajax_send_dfs_request failed: ${res.message ?? JSON.stringify(res)}`);
+    }
+    return res;
+  }
 
   // -------- Add-to-existing-campaign keyword flow --------
   // The wizard's storeRankingDetails endpoint is unreliable outside a real browser
@@ -530,9 +603,9 @@ export class BpStrategistsClient {
       await this.completeSteps(projectId, 2);
     }
 
-    // The wizard's /ajax_store_ranking_details endpoint returns status:1 from
-    // any non-browser context but does NOT persist keywords. Instead we use the
-    // "add to existing campaign" pair, which works reliably from a Bun client.
+    // Matches the wizard's 4-POST flow exactly. The earlier workaround
+    // (ajax_add_keywords_data + ajax_send_dfs_request) is retained on this
+    // client for the separate "Add Keywords" popup on existing campaigns.
     const locs = resolved.map((r) => ({
       searchLocation: r.searchLocation,
       latitude: r.latitude,
@@ -540,32 +613,30 @@ export class BpStrategistsClient {
       country: r.country,
       locationId: r.locationId,
     }));
-    const ignoreLocalListing = 2 as const;
+    const ignoreLocalListing = 0 as const; // wizard default (Local + Organic)
     const tracking = input.device ?? 'desktop';
-    const add = await this.addKeywordsData({
-      campaignId: projectId,
-      domainUrl: input.domain,
+    const searchEngine = input.searchEngine ?? primary.searchEngine;
+    const language = input.language ?? 'English';
+
+    const ranking = await this.storeRankingDetails({
+      projectId,
       keywords: input.keywords,
       keywordTag,
       locations: locs,
-      searchEngineRegion: input.searchEngine ?? primary.searchEngine,
-      language: input.language ?? 'English',
+      searchEngine,
+      language,
       ignoreLocalListing,
       device: tracking,
     });
-    for (const keywordSet of add.keywordFinal ?? [input.keywords]) {
-      await this.sendDfsRequest({
-        campaignId: projectId,
-        domainUrl: input.domain,
-        keywords: keywordSet,
-        regions: input.searchEngine ?? primary.searchEngine,
-        language: input.language ?? 'English',
-        locations: locs,
-        device: tracking,
-        ignoreLocalListing,
-        tagId: add.tag_id ?? '',
-      });
-    }
+
+    await this.bindNewProjectKeywords({
+      projectId,
+      finalKeywords: ranking.keyword_field ?? input.keywords,
+      region: ranking.region ?? searchEngine,
+      ignoreLocalListing: (Number(ranking.ignore_local_listing ?? ignoreLocalListing) || 0) as 0 | 1 | 2,
+      tagId: ranking.tag_id ?? '',
+      locations: locs,
+    });
 
     return {
       projectId,
@@ -581,7 +652,7 @@ export class BpStrategistsClient {
     return project.last_id;
   }
 
-  /** Full wizard: project info -> integrations (optional) -> ranking details. */
+  /** Full wizard: project info -> integrations (optional) -> ranking details -> bind. */
   async createFullCampaign(input: FullCampaignInput): Promise<number> {
     const projectId = await this.createCampaignShell(input);
 
@@ -590,10 +661,18 @@ export class BpStrategistsClient {
         campaignId: projectId,
         ...input.integrations.searchConsole,
       });
+      await this.completeSteps(projectId, 2);
     }
-    await this.completeSteps(projectId, 2);
 
-    await this.storeRankingDetails({ ...input.ranking, projectId });
+    const ranking = await this.storeRankingDetails({ ...input.ranking, projectId });
+    await this.bindNewProjectKeywords({
+      projectId,
+      finalKeywords: ranking.keyword_field ?? input.ranking.keywords,
+      region: ranking.region ?? input.ranking.searchEngine,
+      ignoreLocalListing: (Number(ranking.ignore_local_listing ?? input.ranking.ignoreLocalListing) || 0) as 0 | 1 | 2,
+      tagId: ranking.tag_id ?? '',
+      locations: input.ranking.locations,
+    });
     return projectId;
   }
 
@@ -775,9 +854,8 @@ export class BpStrategistsClient {
   private async postMultipart(path: string, form: FormData): Promise<Response> {
     await this.ensurePrimed();
     if (form.has('_token')) form.set('_token', this.token);
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await this.http.fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      redirect: 'manual',
       headers: this.baseHeaders('multipart'),
       body: form,
     });
@@ -792,9 +870,8 @@ export class BpStrategistsClient {
    */
   private async ensurePrimed(): Promise<void> {
     if (this.primed) return;
-    const res = await fetch(`${this.baseUrl}/dashboard`, {
+    const res = await this.http.fetch(`${this.baseUrl}/dashboard`, {
       method: 'GET',
-      redirect: 'manual',
       headers: this.baseHeaders('GET'),
     });
     this.absorbSetCookie(res);
@@ -833,8 +910,8 @@ export class BpStrategistsClient {
   }
 
   private async getRaw(path: string): Promise<Response> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      redirect: 'manual',
+    const res = await this.http.fetch(`${this.baseUrl}${path}`, {
+      method: 'GET',
       headers: this.baseHeaders('GET'),
     });
     this.absorbSetCookie(res);
@@ -851,11 +928,10 @@ export class BpStrategistsClient {
     await this.ensurePrimed();
     // _token field, if present, should reflect the current (possibly refreshed) CSRF.
     if (body.has('_token')) body.set('_token', this.token);
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await this.http.fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      redirect: 'manual',
       headers: this.baseHeaders('POST'),
-      body,
+      body: body.toString(),
     });
     this.absorbSetCookie(res);
     this.assertOk(res, path);
@@ -865,8 +941,17 @@ export class BpStrategistsClient {
   private baseHeaders(method: 'GET' | 'POST' | 'multipart'): Record<string, string> {
     const h: Record<string, string> = {
       Accept: 'application/json, text/javascript, */*; q=0.01',
+      'Accept-Encoding': 'gzip, deflate, br, zstd',
+      'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6',
       Origin: this.baseUrl,
+      Priority: 'u=1, i',
       Referer: `${this.baseUrl}/add-new-campaign`,
+      'Sec-Ch-Ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"macOS"',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
       'User-Agent':
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
       'X-CSRF-TOKEN': this.token,

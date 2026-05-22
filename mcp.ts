@@ -150,6 +150,18 @@ server.tool(
 );
 
 server.tool(
+  'archive_campaign',
+  'Archive a campaign by numeric id. Moves it to the Archived list and frees a project slot.',
+  {
+    campaignId: z.number().int().describe('Numeric campaign id (the "id" field from list_campaigns).'),
+  },
+  async ({ campaignId }) => {
+    const res = await client.archiveCampaign(campaignId);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
   'check_domain',
   'DNS-check a domain before creating. create_campaign rejects unresolvable domains.',
   { domain: z.string() },

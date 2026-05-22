@@ -1,4 +1,4 @@
-import { BpStrategistsClient } from './client.ts';
+import { BpStrategistsClient } from '../client.ts';
 
 const token = process.env.BP_TOKEN;
 const sessionCookie = process.env.BP_SESSION;
