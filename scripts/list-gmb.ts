@@ -8,10 +8,8 @@ import { BpStrategistsClient } from '../client.ts';
 const client = new BpStrategistsClient({
   token: process.env.BP_TOKEN!,
   sessionCookie: process.env.BP_SESSION!,
-  userId: Number(process.env.BP_USER_ID),
 });
 
-const userId = Number(process.env.BP_USER_ID);
 
 const campaigns = (await client.listCampaigns({ archived: false, limit: 200 })).campaigns;
 console.log(`Active campaigns: ${campaigns.length}`);

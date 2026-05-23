@@ -9,7 +9,6 @@ import { BpStrategistsClient } from './client.ts';
 const client = new BpStrategistsClient({
   token: process.env.BP_TOKEN!,
   sessionCookie: process.env.BP_SESSION!,
-  userId: Number(process.env.BP_USER_ID),
 });
 
 const filter = process.argv[2]?.toLowerCase();

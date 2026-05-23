@@ -14,15 +14,12 @@ import { listSupportedCountries } from './locations.ts';
 
 const token = process.env.BP_TOKEN;
 const sessionCookie = process.env.BP_SESSION;
-const userId = Number(process.env.BP_USER_ID);
-if (!token || !sessionCookie || !Number.isFinite(userId)) {
-  console.error(
-    'Missing BP_TOKEN, BP_SESSION, or BP_USER_ID in ./.env (this repo).',
-  );
+if (!token || !sessionCookie) {
+  console.error('Missing BP_TOKEN or BP_SESSION in ./.env. Run `bun run login`.');
   process.exit(1);
 }
 
-const client = new BpStrategistsClient({ token, sessionCookie, userId });
+const client = new BpStrategistsClient({ token, sessionCookie });
 
 const server = new McpServer({
   name: 'bpstrategists',
@@ -298,7 +295,7 @@ server.tool(
   'DNS-check a domain before creating. create_campaign rejects unresolvable domains.',
   { domain: z.string() },
   async ({ domain }) => {
-    const res = await client.checkDnsRecord(domain, client.userId);
+    const res = await client.checkDnsRecord(domain);
     return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
   },
 );

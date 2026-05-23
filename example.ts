@@ -2,13 +2,12 @@ import { BpStrategistsClient } from './client.ts';
 
 const token = process.env.BP_TOKEN;
 const sessionCookie = process.env.BP_SESSION;
-const userId = Number(process.env.BP_USER_ID);
-if (!token || !sessionCookie || !Number.isFinite(userId)) {
-  console.error('Set BP_TOKEN, BP_SESSION, BP_USER_ID.');
+if (!token || !sessionCookie) {
+  console.error('Set BP_TOKEN and BP_SESSION.');
   process.exit(1);
 }
 
-const client = new BpStrategistsClient({ token, sessionCookie, userId });
+const client = new BpStrategistsClient({ token, sessionCookie });
 
 const result = await client.createCampaign({
   domain: 'simonbalfe.com',

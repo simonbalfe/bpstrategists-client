@@ -1,43 +1,52 @@
 #!/usr/bin/env bun
-// End-to-end GMB posting test using the campaign + email_id from the captured HAR:
-//   campaign_id = 32092, email_id = 7094 (BP Strategists agency, simonbalfe.com).
-// Steps:
-//   1. Discover GMB channels via the new /ajax_get_gmb_accounts endpoint.
-//   2. Resolve the encrypted campaign token via /campaign_gmb_content/<id>.
-//   3. Publish a CLEARLY-MARKED test post so it can be reviewed/removed.
+// Canonical GMB post scheduling smoke test.
+// Schedules a post to a GMB location on a campaign for 24h from now,
+// then verifies it appears in the calendar feed.
 
 import '../env.ts';
 import { BpStrategistsClient } from '../client.ts';
 
-const CAMPAIGN_ID = 32092;
-const EMAIL_ID = 7094;
-
-const client = new BpStrategistsClient({
-  token: process.env.BP_TOKEN!,
-  sessionCookie: process.env.BP_SESSION!,
-  userId: Number(process.env.BP_USER_ID),
-});
-
-// 1. List GMB channels (the missing piece — channelId for schedule_gmb_post).
-const channels = await client.listGmbAccounts(EMAIL_ID, CAMPAIGN_ID);
-console.log('gmb channels:', channels);
-if (!channels.length) {
-  console.error('No GMB channels returned — campaign may not have GMB connected.');
+const token = process.env.BP_TOKEN!;
+const sessionCookie = process.env.BP_SESSION!;
+if (!token || !sessionCookie) {
+  console.error('Missing BP_TOKEN or BP_SESSION. Run `bun run login`.');
   process.exit(1);
 }
-const channel = channels[0];
-console.log(`using channelId=${channel.id} label="${channel.label}"`);
 
-// 2. Resolve encrypted campaignId (also new, needed for schedule_gmb_post).
-const encrypted = await client.getEncryptedCampaignId(CAMPAIGN_ID);
-console.log('encrypted campaignId:', encrypted.slice(0, 60) + '...');
+const CAMPAIGN_ID = 32132; // simonbalfe.com campaign with HermesOps GMB attached.
+const CHANNEL_ID = 32235; // HermesOps GMB location id.
+const IMAGE_PATH = '/Users/simon/Downloads/ring.jpg';
 
-// 3. Publish a real post with a clear test marker so it's easy to identify and delete.
-const text = `[API integration test ${new Date().toISOString()}] Please disregard — this post was created by an automated test and can be safely deleted.`;
-const result = await client.scheduleGmbPost({
-  campaignId: encrypted,
-  channelId: channel.id,
-  text,
-  // no images, no CTA — minimum side effects
+const client = new BpStrategistsClient({ token, sessionCookie });
+
+const inDay = new Date(Date.now() + 24 * 60 * 60 * 1000);
+const scheduleTime = inDay.toISOString().slice(0, 19).replace('T', ' ');
+
+const post = await client.scheduleGmbPost({
+  campaignId: CAMPAIGN_ID,
+  channelId: CHANNEL_ID,
+  text: `GMB smoke test — scheduled at ${new Date().toISOString()}`,
+  images: [IMAGE_PATH],
+  scheduleTime,
+  timeZone: 'Europe/London',
+  sectionType: 'whatsnew',
 });
-console.log('scheduleGmbPost result:', result);
+
+console.log('Scheduled:', post);
+
+const start = new Date().toISOString().slice(0, 10);
+const end = inDay.toISOString().slice(0, 10);
+const encrypted = await client.getEncryptedCampaignId(CAMPAIGN_ID);
+const calendar = await client.getCalendarPosts({
+  campaignId: encrypted,
+  numericCampaignId: CAMPAIGN_ID,
+  startDate: start,
+  endDate: end,
+  channelId: CHANNEL_ID,
+});
+
+const items = (calendar as any).data ?? [];
+console.log(`\nCalendar items in window: ${items.length}`);
+const ok = items.length > 0;
+console.log(`Post visible in calendar: ${ok ? 'YES' : 'NO'}`);
+process.exit(ok ? 0 : 1);

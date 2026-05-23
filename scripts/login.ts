@@ -150,7 +150,6 @@ const after = upsertEnvVars(before, {
 });
 writeFileSync(envPath, after);
 console.log('\n.env updated: BP_TOKEN, BP_SESSION');
-console.log('(BP_USER_ID untouched — it is per-account and stable.)');
 
 // ============================================================
 // helpers

@@ -276,7 +276,6 @@ export type AttachGa4Input = {
 export type ClientConfig = {
   token: string;
   sessionCookie: string;
-  userId: number;
   baseUrl?: string;
 };
 
@@ -403,11 +402,9 @@ export class BpStrategistsClient {
   // Chrome TLS fingerprint required — some wizard endpoints silently no-op
   // writes when the request doesn't look like real Chrome.
   private readonly http: Impit;
-  readonly userId: number;
 
   constructor(config: ClientConfig) {
     this.token = config.token;
-    this.userId = config.userId;
     this.baseUrl = config.baseUrl ?? BASE_URL;
     this.http = new Impit({ browser: 'chrome' });
     for (const [k, v] of parseCookieHeader(config.sessionCookie)) {
@@ -496,8 +493,8 @@ export class BpStrategistsClient {
     return out;
   }
 
-  async checkDomainName(name: string, userId: number): Promise<unknown> {
-    return this.getJson(`/checkDomainName?search=${encodeURIComponent(name)}&user_id=${userId}`);
+  async checkDomainName(name: string): Promise<unknown> {
+    return this.getJson(`/checkDomainName?search=${encodeURIComponent(name)}`);
   }
 
   async archiveCampaign(campaignId: number): Promise<{ status: number | string; message?: string }> {
@@ -508,12 +505,12 @@ export class BpStrategistsClient {
     return this.postJson('/ajax_archive_campaign', body);
   }
 
-  async checkDnsRecord(domain: string, userId: number): Promise<unknown> {
-    return this.getJson(`/checkdnsrr?search=${encodeURIComponent(domain)}&user_id=${userId}`);
+  async checkDnsRecord(domain: string): Promise<unknown> {
+    return this.getJson(`/checkdnsrr?search=${encodeURIComponent(domain)}`);
   }
 
-  async listGa4Emails(userId: number): Promise<GoogleAccountOption[]> {
-    const html = await this.getString(`/ajax_get_ga4_emails?user_id=${userId}`);
+  async listGa4Emails(): Promise<GoogleAccountOption[]> {
+    const html = await this.getString('/ajax_get_ga4_emails');
     return parseOptions(html);
   }
 
@@ -577,7 +574,7 @@ export class BpStrategistsClient {
   async listWizardEmails(): Promise<WizardEmailOptions> {
     const [html, ga4] = await Promise.all([
       this.getString('/add-new-campaign'),
-      this.listGa4Emails(this.userId),
+      this.listGa4Emails(),
     ]);
     const sectionIds = {
       searchConsole: 'search_console_existing_emails',

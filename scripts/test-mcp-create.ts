@@ -78,7 +78,6 @@ console.log('projectId =', projectId);
 const client = new BpStrategistsClient({
   token: process.env.BP_TOKEN!,
   sessionCookie: process.env.BP_SESSION!,
-  userId: Number(process.env.BP_USER_ID),
 });
 const stats = (await (client as any).getJson(
   `/ajax_live_keyword_stats?campaign_id=${projectId}&tag_id=&tracking_type=all&locations=`,

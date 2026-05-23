@@ -1,164 +1,106 @@
 # bpstrategists-client
 
-MCP server + TypeScript client for the BP Strategists agency dashboard
-(`bpstrategists.agencydashboard.io`).
+Lets you (or an AI assistant like Claude) control the BP Strategists agency dashboard with plain English instead of clicking through the web UI.
 
-Two entry points:
+You ask things like *"create a new campaign for acme.com with GA4 and GMB attached"* or *"schedule a GMB post for tomorrow at 5pm"*, and it happens.
 
-- `bun run mcp.ts` — exposes the tools below over MCP stdio.
-- `import { BpStrategistsClient } from './client.ts'` — same surface as a library.
+---
 
-## Setup
+## What you can ask it to do
+
+- **Campaigns** — create new tracking campaigns, list active or archived ones, archive old ones, look up which integrations a campaign has attached.
+- **Google connections** — list every Google account connected to the workspace and what each one is connected to (GA4 / Search Console / Ads / Google Business Profile).
+- **Integrations** — find the right GA4 account, Search Console property, Google Ads account, or GMB location to attach to a new campaign.
+- **GMB posting** — write a Google Business Profile post (now or scheduled for the future), upload images, set a call-to-action button, see what's already scheduled.
+- **Domain check** — confirm a domain is reachable before creating a campaign for it.
+
+You don't need to know any of the technical details below; you just talk to the AI and it handles the dashboard.
+
+---
+
+## One-time setup
+
+You need [Bun](https://bun.sh) installed (`curl -fsSL https://bun.sh/install | bash`), then:
 
 ```
 bun install
-cp .env.example .env   # if you have one, otherwise create it
 ```
 
-Required env vars in `./.env`:
+Create a file called `.env` in the project folder with your dashboard login:
 
-| Var | Used for | How to get it |
-|---|---|---|
-| `BP_EMAIL` | autologin | dashboard login email |
-| `BP_PASSWORD` | autologin | dashboard password |
-| `BP_USER_ID` | API calls | numeric user id (stable per account, one-time) |
-| `BP_TOKEN` | CSRF | populated by `bun run login` |
-| `BP_SESSION` | session cookie | populated by `bun run login` |
+```
+BP_EMAIL=you@example.com
+BP_PASSWORD=yourpassword
+```
 
-`BP_USER_ID` is stable per account — set it once. The other two are session-bound and refresh via the autologin below.
-
-## Auth (autologin)
-
-Laravel rolls the session ~daily, so cookies expire. Don't hand-copy them — use the autologin:
+Then log in:
 
 ```
 bun run login
 ```
 
-This runs `scripts/login.ts` which:
+That's it. The login command grabs the cookies it needs and saves them into the same `.env` file. You're now ready to use the tool.
 
-1. `GET agencydashboard.io/` — seeds XSRF + session cookies on the marketing domain, scrapes `<meta name="csrf-token">`.
-2. `POST agencydashboard.io/ajax-do-login` with `BP_EMAIL` + `BP_PASSWORD` + the CSRF token.
-3. Follows the SSO bridge URL onto `bpstrategists.agencydashboard.io`, picking up the subdomain's session cookies.
-4. `GET bpstrategists.agencydashboard.io/dashboard` — scrapes the fresh CSRF.
-5. Writes the refreshed `BP_TOKEN` + `BP_SESSION` back to `./.env`.
+---
 
-After running it, reconnect the MCP server (`/mcp` in Claude Code) so the process picks up the new env. Re-run any time you start hitting 401s.
+## Daily use
 
-## MCP tools
-
-### `create_campaign` — the main tool
-
-Create a tracking campaign and optionally attach any combination of GSC, GA4, Ads, GMB in one call.
-
-**Inputs**
-
-| Field | Type | Required | Default |
-|---|---|---|---|
-| `domain` | string | yes | — |
-| `keywords` | string[] | yes | — |
-| `locations` | string[] | yes | — |
-| `dashboards` | `("SEO"\|"ADS"\|"GMB"\|"SOCIAL"\|"REPUTO"\|"AI")[]` | no | `["SEO"]` |
-| `volumeLocations` | string[] | no | mirrors `locations` |
-| `regionalDb` | string | no | first location's country |
-| `projectName` | string | no | `"<domain>-<timestamp>"` |
-| `keywordTag` | string | no | `domain` |
-| `searchEngine` | string | no | per-country default |
-| `language` | string | no | `"English"` |
-| `device` | `"desktop"\|"mobile"` | no | `"desktop"` |
-| `serpType` | `"local+organic"\|"organic"\|"local"` | no | `"local+organic"` |
-| `urlType` | `"Root Domain"\|"Exact URL"\|"Subdomain"\|"Subfolder"` | no | `"Root Domain"` |
-| `searchConsole` | `{ googleAccount, property }` | no | — |
-| `ga4` | `{ googleAccount, account, property }` | no | — |
-| `ads` | `{ googleAccount, account }` | no | — |
-| `gmb` | `{ googleAccount, locations: string[] }` | no | — |
-
-**Returns** — `{ projectId, dashboardUrl, serpUrl }`.
-
-Integration blocks use human-readable labels — resolve them with the discovery tools below.
-
-### Discovery — Google accounts
-
-| Tool | Input | Returns |
-|---|---|---|
-| `list_google_accounts` | none | gmails deduplicated, with which provider scopes each has |
-| `list_connected_emails` | none | same data split into raw per-provider pools |
-
-### Discovery — per-provider accounts
-
-Each takes a `googleAccount` gmail and returns `{ id, label }` rows.
-
-| Tool | Input | Returns |
-|---|---|---|
-| `list_search_console_properties` | `googleAccount` | GSC properties |
-| `list_ads_accounts` | `googleAccount` | Google Ads accounts |
-| `list_gmb_locations` | `googleAccount` | GMB locations (`id` = channel id for `schedule_gmb_post`) |
-| `list_ga4_accounts` | `googleAccount` | GA4 accounts (first hop) |
-| `list_ga4_properties` | `accountId` | GA4 properties for a chosen account |
-
-### Campaign management
-
-| Tool | Input | Notes |
-|---|---|---|
-| `list_campaigns` | `archived?`, `limit?` | Default `archived=false`, `limit=50`. |
-| `list_campaign_bindings` | `campaignId?` | Returns GA4/GSC/GMB/Ads ids + `isConnected` flags. Omit `campaignId` for all. |
-| `archive_campaign` | `campaignId` | Moves to Archived, frees a project slot. |
-| `check_domain` | `domain` | DNS-check before `create_campaign`. |
-
-### GMB posting
-
-#### `schedule_gmb_post`
-
-| Field | Type | Required | Default |
-|---|---|---|---|
-| `campaignId` | number | yes | — |
-| `channelId` | number | yes | — |
-| `text` | string | yes | — (≤1500) |
-| `images` | string[] | no | — (local paths OR `https://` URLs) |
-| `scheduleTime` | string | no | now (else `"YYYY-MM-DD HH:mm:ss"` in `timeZone`) |
-| `timeZone` | string | no | `"Europe/London"` |
-| `sectionType` | `"whatsnew"\|"event"\|"offer"` | no | `"whatsnew"` |
-| `cta` | `{ action, url? }` | no | — |
-
-CTA actions: `none`, `book`, `order`, `shop`, `learn_more`, `sign_up`, `call`.
-
-The client handles the encrypted Laravel campaign token and the Referer dance — callers pass numeric ids only.
-
-#### `list_gmb_posts`
-
-| Field | Type | Required | Default |
-|---|---|---|---|
-| `campaignId` | number | yes | — |
-| `startDate` | string | yes | `YYYY-MM-DD` |
-| `endDate` | string | yes | `YYYY-MM-DD` |
-| `channelId` | number\|`"all"` | no | `"all"` |
-
-## Typical flow
+### Start the AI bridge
 
 ```
-list_google_accounts                            // find connected gmails + scopes
-list_gmb_locations(simon@simonbalfe.com)        // pick a location label
-create_campaign({
-  domain: 'mysite.com',
-  keywords: ['my brand'],
-  locations: ['United Kingdom'],
-  dashboards: ['SEO', 'GMB'],
-  gmb: { googleAccount: 'simon@simonbalfe.com', locations: ['HermesOps'] },
-})
-schedule_gmb_post({ campaignId, channelId, text, images })
+bun run mcp.ts
 ```
 
-## Quirks handled internally
+This starts the server that the AI talks to. Leave it running.
 
-- **Ads step-4 handshake 500s server-side.** The Ads attach itself returns 200 and persists; the cosmetic `/complete_steps?steps=4` call always 500s — even in the real browser wizard (verified via HAR capture). The client retries with exponential backoff, then swallows the 500 so campaign creation completes.
-- **Step numbers map to integration type, not call order.** Wizard uses `1=shell, 2=GSC, 4=Ads, 5=GA4`. GMB has no completion step.
-- **GMB location labels.** Wizard surfaces labels like `"HermesOps (14624712567507918236)"`. The client accepts either the full label or the bare name.
-- **GMB post Referer.** All `/storeSocialPostContent` and `/uploadMediaFiles` calls must be referer'd as `/social-post/<numericId>` or Laravel rejects with a generic 422.
+If you're using Claude Code, you'll wire it in once and Claude will pick it up automatically each time.
 
-## Quick test
+### When something stops working
+
+If you get errors saying you're not logged in (typically once every 24 hours):
 
 ```
-bun run scripts/test-create.ts          # creates a campaign via createCampaign()
-bun run scripts/test-all-params.ts      # every optional param set explicitly + all 4 integrations
-bun run scripts/test-mcp-create.ts      # spawns mcp.ts and calls create_campaign over MCP stdio
+bun run login
 ```
+
+That's all — it grabs fresh cookies. Then ask the AI to retry whatever you were doing. If the AI was in the middle of a task, it may need to be reconnected (in Claude Code, type `/mcp` and choose reconnect).
+
+---
+
+## Example things to say
+
+- *"Show me every active campaign."*
+- *"Create a campaign for acme.com with these keywords: ..., tracking from the UK, with our Google Ads and GMB attached."*
+- *"Which campaigns is the simon@simonbalfe.com GMB account on?"*
+- *"Schedule this image as a GMB post for next Tuesday at 9am with a 'Learn more' button linking to acme.com."*
+- *"Archive the test campaigns I made yesterday."*
+- *"Which Google accounts are connected, and what does each one have access to?"*
+
+---
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| AI says "missing BP_TOKEN" or login errors | Run `bun run login` to refresh the cookies. |
+| AI says "missing BP_EMAIL or BP_PASSWORD" | Add them to `.env` (see "One-time setup" above). |
+| Campaign created but missing one integration | The Google Ads handshake is broken on the dashboard server — the integration is actually attached, just check the dashboard to confirm. |
+| AI says it can't reach the dashboard | Check your internet connection and that the dashboard is up at https://bpstrategists.agencydashboard.io. |
+
+---
+
+## For developers
+
+- [docs/tools.md](./docs/tools.md) — full MCP tool reference (every input, every output).
+- [docs/auth.md](./docs/auth.md) — how the autologin works, what's persisted in `.env`, session expiry.
+- [docs/quirks.md](./docs/quirks.md) — dashboard quirks the client handles transparently.
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `bun run login` | Refresh session cookies from email + password. |
+| `bun run scripts/test-create.ts` | Smoke test: create a campaign with all 4 integrations. |
+| `bun run scripts/test-gmb-post.ts` | Smoke test: schedule a GMB post and verify it appears in the calendar. |
+| `bun run scripts/test-mcp-create.ts` | Drives `mcp.ts` over MCP stdio. |
+| `bun run scripts/list-gmb.ts` | List every GMB channel reachable across active campaigns. |
