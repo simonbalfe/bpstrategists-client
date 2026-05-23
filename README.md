@@ -100,7 +100,15 @@ That's all — it grabs fresh cookies. Then ask the AI to retry whatever you wer
 | Script | Purpose |
 |---|---|
 | `bun run login` | Refresh session cookies from email + password. |
-| `bun run scripts/test-create.ts` | Smoke test: create a campaign with all 4 integrations. |
-| `bun run scripts/test-gmb-post.ts` | Smoke test: schedule a GMB post and verify it appears in the calendar. |
-| `bun run scripts/test-mcp-create.ts` | Drives `mcp.ts` over MCP stdio. |
+| `bun run scripts/example.ts` | Minimal usage example. |
+| `bun run scripts/list-bp.ts` | List active campaigns. |
 | `bun run scripts/list-gmb.ts` | List every GMB channel reachable across active campaigns. |
+
+### Tests
+
+Two end-to-end smoke tests covering the main flows:
+
+| Test | Purpose |
+|---|---|
+| `bun run tests/create-campaign.ts` | Create a campaign with all 4 integrations attached and verify the bindings. |
+| `bun run tests/schedule-gmb-post.ts` | Schedule a GMB post and verify it appears in the calendar. |

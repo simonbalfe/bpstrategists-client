@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 // Quick listing of active campaigns. Reads creds from ./.env.
-// Usage: bun list-bp.ts            (all active)
-//        bun list-bp.ts simonbalfe (case-insensitive filter on the row JSON)
+// Usage: bun run scripts/list-bp.ts            (all active)
+//        bun run scripts/list-bp.ts simonbalfe (case-insensitive filter on the row JSON)
 
-import './env.ts';
-import { BpStrategistsClient } from './client.ts';
+import '../env.ts';
+import { BpStrategistsClient } from '../client.ts';
 
 const client = new BpStrategistsClient({
   token: process.env.BP_TOKEN!,

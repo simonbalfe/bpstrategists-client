@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run example.ts",
+    "start": "bun run scripts/example.ts",
     "mcp": "bun run mcp.ts",
     "login": "bun run scripts/login.ts"
   },
