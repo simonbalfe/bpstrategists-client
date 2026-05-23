@@ -3,7 +3,7 @@ import { resolveCountry } from './locations.ts';
 
 const BASE_URL = 'https://bpstrategists.agencydashboard.io';
 
-export type UrlType = 'Root Domain' | 'Subdomain' | 'Subfolder';
+export type UrlType = 'Root Domain' | 'Exact URL' | 'Subdomain' | 'Subfolder';
 export type RegionalDb = 'us' | 'uk' | string;
 
 export type Dashboard =
@@ -14,7 +14,14 @@ export type Dashboard =
   | 13  // REPUTO
   | 15; // AI
 
-export type Device = 'desktop' | 'mobile' | 'tablet';
+export type Device = 'desktop' | 'mobile';
+
+export type SerpType = 'local+organic' | 'organic' | 'local';
+const SERP_TYPE_TO_FLAG: Record<SerpType, 0 | 1 | 2> = {
+  'local+organic': 0,
+  organic: 1,
+  local: 2,
+};
 
 export type SearchLocation = {
   searchLocation: string;
@@ -190,7 +197,51 @@ export type FullCampaignInput = StoreProjectInfoInput & {
   ranking: Omit<StoreRankingDetailsInput, 'projectId'>;
   integrations?: {
     searchConsole?: { email: number; account: number };
+    ads?: { email: number; account: number };
+    gmb?: { email: number; accounts: number[] };
+    ga4?: { email: number; account: number; property: number };
   };
+};
+
+export type WizardEmailOptions = {
+  /** OAuth accounts with GA4 scope. Sourced from /ajax_get_ga4_emails (the wizard's own GA4 section uses this endpoint, not a server-rendered select). */
+  ga4: GoogleAccountOption[];
+  /** OAuth accounts in the GSC dropdown of the new-campaign wizard. */
+  searchConsole: GoogleAccountOption[];
+  /** OAuth accounts in the Ads (adwords) dropdown. */
+  ads: GoogleAccountOption[];
+  /** OAuth accounts in the GMB dropdown. */
+  gmb: GoogleAccountOption[];
+};
+
+export type ConnectedGoogleAccount = {
+  /** Gmail address — case-preserved from whichever provider list it first appeared in. */
+  gmail: string;
+  /** Per-provider OAuth-account internal ID. Undefined if that provider isn't connected for this gmail. */
+  scopes: {
+    ga4?: number;
+    searchConsole?: number;
+    ads?: number;
+    gmb?: number;
+  };
+};
+
+export type AttachGmbInput = {
+  campaignId: number;
+  /** OAuth account internal ID (from WizardEmailOptions.gmb). */
+  email: number;
+  /** One or more GMB location IDs (from listGmbAccounts). */
+  accounts: number[];
+};
+
+export type AttachGa4Input = {
+  campaignId: number;
+  /** OAuth account internal ID (from listGa4Emails / WizardEmailOptions.ga4). */
+  email: number;
+  /** GA4 account ID (from listGa4Accounts). */
+  account: number;
+  /** GA4 property ID (from listGa4Properties). */
+  property: number;
 };
 
 export type ClientConfig = {
@@ -199,8 +250,6 @@ export type ClientConfig = {
   userId: number;
   baseUrl?: string;
 };
-
-// -------- GMB / social posting (same host) --------
 
 export type GmbCtaAction =
   | 'none'
@@ -228,8 +277,8 @@ export type StoreSocialPostResult = {
 };
 
 export type ScheduleGmbPostInput = {
-  /** Encrypted Laravel campaignId (the long base64 token from a /social-post/<id> page). */
-  campaignId: string;
+  /** Numeric campaign id. The client resolves the encrypted token + correct Referer internally. */
+  campaignId: number;
   /** Numeric channel ID for the connected GMB account on this campaign. */
   channelId: number;
   text: string;
@@ -264,18 +313,49 @@ export type CreateCampaignInput = {
   dashboards?: DashboardName[];
   keywords: string[];
   keywordTag?: string;
-  /** One or more country names/aliases, e.g. ["United Kingdom"] or ["uk", "us"]. */
+  /** One or more country names/aliases — controls Search Location (lat/long + searchlocations[]). */
   locations: string[];
+  /**
+   * Optional Volume Location override (DataForSEO volume aggregation region) —
+   * country names that map to locations[] + location_id[] in the POST. If
+   * omitted, Volume Location mirrors `locations`. When supplied, length must
+   * match `locations`.
+   */
+  volumeLocations?: string[];
   /** Override the primary country used for regional_db + default search engine. Defaults to locations[0]. */
   regionalDb?: string;
   searchEngine?: string;
   language?: string;
   device?: Device;
+  /** SERP type — defaults to "local+organic". */
+  serpType?: SerpType;
+  /** URL type — defaults to "Root Domain". */
+  urlType?: UrlType;
   /** Optional GSC attachment using human-readable strings. */
   searchConsole?: {
     /** Gmail address of the OAuth account, e.g. "info@bpstrategists.com". */
     googleAccount: string;
     /** Exact GSC property string, e.g. "sc-domain:example.com". */
+    property: string;
+  };
+  /** Optional Google Ads attachment using human-readable strings. */
+  ads?: {
+    googleAccount: string;
+    /** Exact account label as shown in the wizard's adwords account dropdown. */
+    account: string;
+  };
+  /** Optional GMB attachment using human-readable strings. Locations may be multi-select. */
+  gmb?: {
+    googleAccount: string;
+    /** One or more GMB location labels (e.g. "My Business — London"). */
+    locations: string[];
+  };
+  /** Optional GA4 attachment. The account → property chain is resolved by label. */
+  ga4?: {
+    googleAccount: string;
+    /** GA4 account label (from listGa4Accounts). */
+    account: string;
+    /** GA4 property label (from listGa4Properties). */
     property: string;
   };
 };
@@ -289,13 +369,10 @@ export type CreateCampaignResult = {
 export class BpStrategistsClient {
   private token: string;
   private readonly baseUrl: string;
-  /** Cookie jar — kept in sync with Set-Cookie responses so we get the browser's rolling-session behavior. */
   private readonly cookies = new Map<string, string>();
-  /** Have we fetched at least one HTML page to ensure the CSRF token matches the current session? */
   private primed = false;
-  /** Chrome-impersonating HTTP client. Some endpoints (notably the wizard's
-   * /ajax_store_ranking_details) silently no-op writes when the request doesn't
-   * look like it came from a real Chrome browser — TLS fingerprint included. */
+  // Chrome TLS fingerprint required — some wizard endpoints silently no-op
+  // writes when the request doesn't look like real Chrome.
   private readonly http: Impit;
   readonly userId: number;
 
@@ -307,17 +384,11 @@ export class BpStrategistsClient {
     for (const [k, v] of parseCookieHeader(config.sessionCookie)) {
       this.cookies.set(k, v);
     }
-    // Always prime on first POST: even with a fresh session cookie, the supplied
-    // CSRF token may be stale (or a placeholder). One GET /dashboard refreshes it
-    // from the meta tag and keeps the jar in sync.
   }
 
-  /** Current cookie header value. Useful for persisting between runs. */
   cookieHeader(): string {
     return [...this.cookies.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
   }
-
-  // -------- Discovery --------
 
   async listCampaigns(opts: { limit?: number; offset?: number; archived?: boolean } = {}): Promise<CampaignListResponse> {
     const path = opts.archived ? '/get_archived_campaigns' : '/get_active_campaigns';
@@ -332,7 +403,6 @@ export class BpStrategistsClient {
     return this.getJson(`/checkDomainName?search=${encodeURIComponent(name)}&user_id=${userId}`);
   }
 
-  /** Move a campaign to the archived list. Frees a project slot. */
   async archiveCampaign(campaignId: number): Promise<{ status: number | string; message?: string }> {
     const body = new URLSearchParams({
       request_id: campaignId.toString(),
@@ -345,48 +415,108 @@ export class BpStrategistsClient {
     return this.getJson(`/checkdnsrr?search=${encodeURIComponent(domain)}&user_id=${userId}`);
   }
 
-  // -------- Integration discovery --------
-
-  /** OAuth-connected Google accounts (one row per Gmail address) usable for GA4 picker. */
   async listGa4Emails(userId: number): Promise<GoogleAccountOption[]> {
     const html = await this.getString(`/ajax_get_ga4_emails?user_id=${userId}`);
     return parseOptions(html);
   }
 
-  /** GA4 properties under a given OAuth account. */
-  async listGa4Accounts(email: number, campaignId: number): Promise<GoogleAccountOption[]> {
+  // The campaignId on these list endpoints is decorative — verified by diffing
+  // responses for '', '0', and real ids. Default to 0 so discovery works
+  // without an in-flight project.
+
+  async listGa4Accounts(email: number, campaignId: number = 0): Promise<GoogleAccountOption[]> {
     const html = await this.getString(`/ajax_get_ga4_accounts?email=${email}&campaign_id=${campaignId}`);
     return parseOptions(html);
   }
 
-  /** GSC properties under a given OAuth account. */
-  async listConsoleProperties(email: number, campaignId: number): Promise<GoogleAccountOption[]> {
+  async listGa4Properties(accountId: number, campaignId: number = 0): Promise<GoogleAccountOption[]> {
+    const html = await this.getString(`/ajax_get_ga4_properties?account_id=${accountId}&campaign_id=${campaignId}`);
+    return parseOptions(html);
+  }
+
+  async listConsoleProperties(email: number, campaignId: number = 0): Promise<GoogleAccountOption[]> {
     const html = await this.getString(`/ajax_get_console_urls?email=${email}&campaign_id=${campaignId}`);
     return parseOptions(html);
   }
 
-  /**
-   * GMB locations (the "channels" you can post to) under a given OAuth account.
-   * Each option's value is the channelId expected by scheduleGmbPost.
-   */
-  async listGmbAccounts(email: number, campaignId: number): Promise<GoogleAccountOption[]> {
+  async listGmbAccounts(email: number, campaignId: number = 0): Promise<GoogleAccountOption[]> {
     const html = await this.getString(`/ajax_get_gmb_accounts?email=${email}&campaign_id=${campaignId}`);
     return parseOptions(html);
   }
 
-  /**
-   * Resolve the encrypted Laravel campaignId (the long base64 token) from the
-   * numeric campaign id. scheduleGmbPost and listGmbPosts both require this
-   * encrypted form. Scrapes it from the GMB tab HTML, which embeds it inline.
-   */
-  async getEncryptedCampaignId(numericCampaignId: number): Promise<string> {
-    const html = await this.getString(`/campaign_gmb_content/${numericCampaignId}`);
-    const m = html.match(/eyJ[A-Za-z0-9+/=]{50,}/);
-    if (!m) throw new Error(`Could not locate encrypted campaign token in /campaign_gmb_content/${numericCampaignId}`);
-    return m[0];
+  async listAdsAccounts(email: number, campaignId: number = 0): Promise<GoogleAccountOption[]> {
+    const html = await this.getString(`/ajax_get_adwords_accounts?email=${email}&campaign_id=${campaignId}`);
+    return parseOptions(html);
   }
 
-  // -------- Project creation flow --------
+  async listConnectedGoogleAccounts(): Promise<ConnectedGoogleAccount[]> {
+    const w = await this.listWizardEmails();
+    const byGmail = new Map<string, ConnectedGoogleAccount>();
+    const upsert = (
+      provider: keyof ConnectedGoogleAccount['scopes'],
+      list: GoogleAccountOption[],
+    ) => {
+      for (const e of list) {
+        const key = e.label.toLowerCase();
+        let row = byGmail.get(key);
+        if (!row) {
+          row = { gmail: e.label, scopes: {} };
+          byGmail.set(key, row);
+        }
+        row.scopes[provider] = e.id;
+      }
+    };
+    upsert('ga4', w.ga4);
+    upsert('searchConsole', w.searchConsole);
+    upsert('ads', w.ads);
+    upsert('gmb', w.gmb);
+    return [...byGmail.values()].sort((a, b) => a.gmail.localeCompare(b.gmail));
+  }
+
+  // GSC/Ads/GMB emails come from the wizard page only — no JSON endpoint exists
+  // (probed `ajax_get_*_emails` for each; all return the catch-all dashboard HTML).
+  // GA4 uses /ajax_get_ga4_emails because the wizard's analytics_existing_emails
+  // select is for the dead Universal Analytics flow.
+  async listWizardEmails(): Promise<WizardEmailOptions> {
+    const [html, ga4] = await Promise.all([
+      this.getString('/add-new-campaign'),
+      this.listGa4Emails(this.userId),
+    ]);
+    const sectionIds = {
+      searchConsole: 'search_console_existing_emails',
+      ads: 'adwords_existing_emails',
+      gmb: 'settings_gmb_existing_emails',
+    } as const;
+    const out: WizardEmailOptions = { ga4, searchConsole: [], ads: [], gmb: [] };
+    const selectRe = /<select[^>]*(?:id|name)="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
+    for (const m of html.matchAll(selectRe)) {
+      const id = m[1];
+      const target = (Object.entries(sectionIds) as [Exclude<keyof WizardEmailOptions, 'ga4'>, string][])
+        .find(([, key]) => id === key);
+      if (!target) continue;
+      const opts: GoogleAccountOption[] = [];
+      for (const o of m[2].matchAll(/<option[^>]*value="([^"]*)"[^>]*>([^<]*)<\/option>/g)) {
+        const value = o[1].trim();
+        const label = o[2].trim();
+        if (!value || !label || label.toLowerCase().startsWith('select')) continue;
+        const id = Number(value);
+        if (!Number.isFinite(id)) continue;
+        opts.push({ id, label });
+      }
+      out[target[0]] = opts;
+    }
+    return out;
+  }
+
+  // The /campaign_gmb_content/<id> page embeds the encrypted GMB channel token,
+  // not the campaign token. The /social-post/<id> page has the right one in
+  // <input id="socialCampaign" value="...">.
+  async getEncryptedCampaignId(numericCampaignId: number): Promise<string> {
+    const html = await this.getString(`/social-post/${numericCampaignId}`);
+    const m = html.match(/id=["']socialCampaign["'][^>]*value=["'](eyJ[A-Za-z0-9+/=]+)["']/);
+    if (!m) throw new Error(`Could not locate socialCampaign token in /social-post/${numericCampaignId}`);
+    return m[1];
+  }
 
   async storeProjectInfo(input: StoreProjectInfoInput): Promise<StoreProjectInfoResponse> {
     const body = new URLSearchParams();
@@ -491,12 +621,10 @@ export class BpStrategistsClient {
     return res;
   }
 
-  // -------- Add-to-existing-campaign keyword flow --------
-  // The wizard's storeRankingDetails endpoint is unreliable outside a real browser
-  // session (returns status:1 but never persists). These two endpoints back the
-  // dashboard's "Add Keywords" popup and work from any HTTP client.
+  // Add-to-existing-campaign keyword flow. The wizard's storeRankingDetails
+  // returns status:1 but never persists outside a real browser session; these
+  // two back the dashboard's "Add Keywords" popup and work from any HTTP client.
 
-  /** Step 1: register keywords against an existing campaign. */
   async addKeywordsData(input: AddKeywordsDataInput): Promise<AddKeywordsDataResponse> {
     const body = new URLSearchParams();
     body.set('_token', this.token);
@@ -524,7 +652,6 @@ export class BpStrategistsClient {
     return res;
   }
 
-  /** Step 2: queue DataForSEO ranking lookups for keywords just registered. */
   async sendDfsRequest(input: SendDfsRequestInput): Promise<SendDfsRequestResponse> {
     const body = new URLSearchParams();
     body.set('_token', this.token);
@@ -551,19 +678,14 @@ export class BpStrategistsClient {
     return res;
   }
 
-  // -------- Integrations (Search Console) --------
-
-  /** Attach a GSC property to a brand new project (in-wizard step 2). */
   async attachSearchConsole(input: AttachIntegrationInput): Promise<unknown> {
     return this.postJson('/ajax_save_new_project_console_data', this.integrationBody(input));
   }
 
-  /** Change the GSC property on an existing project (settings page). */
   async updateSearchConsole(input: AttachIntegrationInput): Promise<unknown> {
     return this.postJson('/ajax_update_console_data', this.integrationBody(input));
   }
 
-  /** Remove the GSC connection from a campaign. */
   async disconnectSearchConsole(campaignId: number): Promise<unknown> {
     const body = new URLSearchParams({
       request_id: campaignId.toString(),
@@ -572,15 +694,52 @@ export class BpStrategistsClient {
     return this.postJson('/ajax_disconnect_console', body);
   }
 
-  // -------- Composed flows --------
+  async attachAds(input: AttachIntegrationInput): Promise<unknown> {
+    return this.postJson('/ajax_save_new_project_adwords_data', this.integrationBody(input));
+  }
 
-  /**
-   * High-level: create a campaign end-to-end using human-friendly names.
-   * Resolves location, dashboards, and (optionally) GSC integration internally.
-   */
+  // `account[]` is repeated — GMB supports multi-select natively.
+  // Each attached location needs a follow-up GET /log_gmb_data?campaign_id&account_id
+  // to fully commit; without it the GMB tab shows "No Location Found" and
+  // /storeSocialPostContent returns 422 "A server error occurred while posting GMB posts".
+  async attachGmb(input: AttachGmbInput): Promise<unknown> {
+    const body = new URLSearchParams();
+    body.set('campaign_id', input.campaignId.toString());
+    body.set('email', input.email.toString());
+    for (const acc of input.accounts) body.append('account[]', acc.toString());
+    body.set('_token', this.token);
+    const res = await this.postJson('/ajax_update_gmb_data', body);
+    for (const acc of input.accounts) {
+      await this.getRaw(`/log_gmb_data?campaign_id=${input.campaignId}&account_id=${acc}`);
+    }
+    return res;
+  }
+
+  // -------- Integrations (GA4) --------
+
+  /** Attach a GA4 account+property to a brand new project (in-wizard). GA4 has no "view" concept. */
+  async attachGa4(input: AttachGa4Input): Promise<unknown> {
+    const body = new URLSearchParams({
+      campaign_id: input.campaignId.toString(),
+      email: input.email.toString(),
+      account: input.account.toString(),
+      property: input.property.toString(),
+      _token: this.token,
+    });
+    return this.postJson('/ajax_store_ga4_data', body);
+  }
+
   async createCampaign(input: CreateCampaignInput): Promise<CreateCampaignResult> {
     if (!input.locations.length) throw new Error('At least one location is required.');
     const resolved = input.locations.map(resolveCountry);
+    const volumeResolved = input.volumeLocations
+      ? input.volumeLocations.map(resolveCountry)
+      : resolved;
+    if (volumeResolved.length !== resolved.length) {
+      throw new Error(
+        `volumeLocations length (${volumeResolved.length}) must match locations length (${resolved.length}).`,
+      );
+    }
     const primary = resolved[0];
     const dashboardNames = input.dashboards ?? ['SEO'];
     const dashboards = dashboardNames.map((n) => {
@@ -594,47 +753,88 @@ export class BpStrategistsClient {
     const projectId = await this.createCampaignShell({
       projectName,
       domainUrl: input.domain,
-      urlType: 'Root Domain',
+      urlType: input.urlType ?? 'Root Domain',
       regionalDb: input.regionalDb ?? primary.regionalDb,
       dashboards,
     });
 
+    const wantsIntegration = !!(input.searchConsole || input.ads || input.gmb || input.ga4);
+    const wizard = wantsIntegration ? await this.listWizardEmails() : null;
+    const pickEmail = (
+      provider: keyof WizardEmailOptions,
+      gmail: string,
+    ): GoogleAccountOption => {
+      const pool = wizard![provider];
+      const hit = pool.find((e) => e.label.toLowerCase() === gmail.toLowerCase());
+      if (!hit) {
+        throw new Error(
+          `Google account "${gmail}" not connected to ${provider}. Available: ${pool.map((e) => e.label).join(', ') || '(none)'}`,
+        );
+      }
+      return hit;
+    };
+    const pickAccount = (
+      options: GoogleAccountOption[],
+      wanted: string,
+      label: string,
+    ): GoogleAccountOption => {
+      const hit = options.find((o) => o.label.toLowerCase() === wanted.toLowerCase());
+      if (!hit) {
+        throw new Error(
+          `${label} "${wanted}" not found. Available: ${options.map((o) => o.label).join(', ') || '(none)'}`,
+        );
+      }
+      return hit;
+    };
+
     if (input.searchConsole) {
-      const emails = await this.listGa4Emails(this.userId);
-      const email = emails.find(
-        (e) => e.label.toLowerCase() === input.searchConsole!.googleAccount.toLowerCase(),
-      );
-      if (!email) {
-        throw new Error(
-          `Google account "${input.searchConsole.googleAccount}" not connected. Available: ${emails.map((e) => e.label).join(', ')}`,
-        );
-      }
+      const email = pickEmail('searchConsole', input.searchConsole.googleAccount);
       const properties = await this.listConsoleProperties(email.id, projectId);
-      const property = properties.find(
-        (p) => p.label.toLowerCase() === input.searchConsole!.property.toLowerCase(),
-      );
-      if (!property) {
-        throw new Error(
-          `GSC property "${input.searchConsole.property}" not found under ${email.label}. Available: ${properties.map((p) => p.label).join(', ')}`,
-        );
-      }
+      const property = pickAccount(properties, input.searchConsole.property, 'GSC property');
       await this.attachSearchConsole({ campaignId: projectId, email: email.id, account: property.id });
-      // Mark step 2 complete only when we actually attached an integration.
-      // With no GSC, the server has nothing to commit and 500s.
+      // Step 2 only when GSC was actually attached — server 500s if marked with nothing committed.
       await this.completeSteps(projectId, 2);
     }
 
-    // Matches the wizard's 4-POST flow exactly. The earlier workaround
-    // (ajax_add_keywords_data + ajax_send_dfs_request) is retained on this
-    // client for the separate "Add Keywords" popup on existing campaigns.
-    const locs = resolved.map((r) => ({
+    if (input.ga4) {
+      const email = pickEmail('ga4', input.ga4.googleAccount);
+      const accounts = await this.listGa4Accounts(email.id);
+      const account = pickAccount(accounts, input.ga4.account, 'GA4 account');
+      const properties = await this.listGa4Properties(account.id);
+      const property = pickAccount(properties, input.ga4.property, 'GA4 property');
+      await this.attachGa4({
+        campaignId: projectId,
+        email: email.id,
+        account: account.id,
+        property: property.id,
+      });
+      await this.completeSteps(projectId, 3);
+    }
+
+    if (input.ads) {
+      const email = pickEmail('ads', input.ads.googleAccount);
+      const accounts = await this.listAdsAccounts(email.id, projectId);
+      const account = pickAccount(accounts, input.ads.account, 'Ads account');
+      await this.attachAds({ campaignId: projectId, email: email.id, account: account.id });
+      await this.completeSteps(projectId, 4);
+    }
+
+    if (input.gmb) {
+      const email = pickEmail('gmb', input.gmb.googleAccount);
+      const locations = await this.listGmbAccounts(email.id, projectId);
+      const picked = input.gmb.locations.map((name) => pickAccount(locations, name, 'GMB location').id);
+      await this.attachGmb({ campaignId: projectId, email: email.id, accounts: picked });
+      // GMB has no completeSteps in the wizard — ajax_update_gmb_data is the final write.
+    }
+
+    const locs = resolved.map((r, i) => ({
       searchLocation: r.searchLocation,
       latitude: r.latitude,
       longitude: r.longitude,
-      country: r.country,
-      locationId: r.locationId,
+      country: volumeResolved[i].country,
+      locationId: volumeResolved[i].locationId,
     }));
-    const ignoreLocalListing = 0 as const; // wizard default (Local + Organic)
+    const ignoreLocalListing = SERP_TYPE_TO_FLAG[input.serpType ?? 'local+organic'];
     const tracking = input.device ?? 'desktop';
     const searchEngine = input.searchEngine ?? primary.searchEngine;
     const language = input.language ?? 'English';
@@ -666,14 +866,12 @@ export class BpStrategistsClient {
     };
   }
 
-  /** Step 1 only: create the campaign shell and advance past Campaign Info. */
   async createCampaignShell(input: StoreProjectInfoInput): Promise<number> {
     const project = await this.storeProjectInfo(input);
     await this.completeSteps(project.last_id, 1);
     return project.last_id;
   }
 
-  /** Full wizard: project info -> integrations (optional) -> ranking details -> bind. */
   async createFullCampaign(input: FullCampaignInput): Promise<number> {
     const projectId = await this.createCampaignShell(input);
 
@@ -699,8 +897,19 @@ export class BpStrategistsClient {
 
   // -------- GMB / social posting --------
 
+  // All /storeSocialPostContent, /uploadMediaFiles, /removeUploadMediaFiles,
+  // /removeDirectoryAndFiles and /get-calendar-social-post-content calls must
+  // be referer'd as /social-post/<numericId> — Laravel route protection rejects
+  // otherwise with a generic 422 "A server error occurred while posting GMB posts".
+  private socialPostReferer(numericId: number): string {
+    return `${this.baseUrl}/social-post/${numericId}`;
+  }
+
   async uploadMedia(opts: {
+    /** Encrypted Laravel campaignId (form field). */
     campaignId: string;
+    /** Numeric campaign id (used for the Referer). */
+    numericCampaignId: number;
     file: Blob;
     fileName: string;
     /** Must match the `datetime` sent in storeSocialPost. */
@@ -715,7 +924,9 @@ export class BpStrategistsClient {
     form.append('_token', this.token);
     form.append('datetime', opts.datetime);
     form.append('postType', opts.postType ?? 'whatnew');
-    const res = await this.postMultipart('/uploadMediaFiles', form);
+    const res = await this.postMultipart('/uploadMediaFiles', form, {
+      referer: this.socialPostReferer(opts.numericCampaignId),
+    });
     const json = (await res.json()) as { status: boolean; fileData?: UploadMediaResult };
     if (!json.status || !json.fileData) {
       throw new Error(`uploadMediaFiles failed: ${JSON.stringify(json)}`);
@@ -725,6 +936,7 @@ export class BpStrategistsClient {
 
   async storeSocialPost(opts: {
     campaignId: string;
+    numericCampaignId: number;
     channelId: number;
     channelType: 'gmb';
     datetime: string;
@@ -750,24 +962,10 @@ export class BpStrategistsClient {
     form.append('result', JSON.stringify(opts.posts));
     // Second `channels` field, JSON-encoded — the server reads both.
     form.append('channels', JSON.stringify({ [opts.channelId]: opts.channelType }));
-    const res = await this.postMultipart('/storeSocialPostContent', form);
-    return (await res.json()) as StoreSocialPostResult;
-  }
-
-  async removeUploadedMedia(opts: {
-    campaignId: string;
-    fileName: string;
-    datetime: string;
-    fileType?: 'image' | 'video';
-  }): Promise<unknown> {
-    const body = new URLSearchParams({
-      fileName: opts.fileName,
-      campaignId: opts.campaignId,
-      _token: this.token,
-      datetime: opts.datetime,
-      fileType: opts.fileType ?? 'image',
+    const res = await this.postMultipart('/storeSocialPostContent', form, {
+      referer: this.socialPostReferer(opts.numericCampaignId),
     });
-    return this.postJson('/removeUploadMediaFiles', body);
+    return (await res.json()) as StoreSocialPostResult;
   }
 
   async cleanupUploadDirectory(campaignId: string): Promise<unknown> {
@@ -776,7 +974,10 @@ export class BpStrategistsClient {
   }
 
   async getCalendarPosts(opts: {
+    /** Encrypted Laravel campaignId (form field). */
     campaignId: string;
+    /** Numeric campaign id (used for the Referer). */
+    numericCampaignId: number;
     /** "YYYY-MM-DD". */
     startDate: string;
     /** "YYYY-MM-DD". */
@@ -803,6 +1004,8 @@ export class BpStrategistsClient {
     if (!input.text.trim() && !(input.images?.length)) {
       throw new Error('GMB post needs at least text or one image.');
     }
+    const numericCampaignId = input.campaignId;
+    const encryptedCampaignId = await this.getEncryptedCampaignId(numericCampaignId);
     const datetime = formatLocalDatetime(new Date());
     const cta = input.cta?.action ?? 'none';
     const ctaUrl = input.cta?.url ?? '';
@@ -813,12 +1016,15 @@ export class BpStrategistsClient {
         imageUrls.push(item);
         continue;
       }
-      imageUrls.push(await this.uploadLocalImage(input.campaignId, item, datetime));
+      imageUrls.push(
+        await this.uploadLocalImage(encryptedCampaignId, numericCampaignId, item, datetime),
+      );
     }
 
     const sectionType = input.sectionType ?? 'whatsnew';
     const raw = await this.storeSocialPost({
-      campaignId: input.campaignId,
+      campaignId: encryptedCampaignId,
+      numericCampaignId,
       channelId: input.channelId,
       channelType: 'gmb',
       datetime,
@@ -840,7 +1046,7 @@ export class BpStrategistsClient {
       ],
     });
 
-    await this.cleanupUploadDirectory(input.campaignId).catch(() => undefined);
+    await this.cleanupUploadDirectory(encryptedCampaignId).catch(() => undefined);
 
     return {
       scheduled: Boolean(input.scheduleTime),
@@ -851,7 +1057,8 @@ export class BpStrategistsClient {
   }
 
   private async uploadLocalImage(
-    campaignId: string,
+    encryptedCampaignId: string,
+    numericCampaignId: number,
     filePath: string,
     datetime: string,
   ): Promise<string> {
@@ -861,7 +1068,8 @@ export class BpStrategistsClient {
     const mime = file.type || guessMime(fileName);
     const blob = new Blob([await file.arrayBuffer()], { type: mime });
     const uploaded = await this.uploadMedia({
-      campaignId,
+      campaignId: encryptedCampaignId,
+      numericCampaignId,
       file: blob,
       fileName,
       datetime,
@@ -872,12 +1080,14 @@ export class BpStrategistsClient {
 
   // -------- HTTP plumbing --------
 
-  private async postMultipart(path: string, form: FormData): Promise<Response> {
+  private async postMultipart(path: string, form: FormData, opts: { referer?: string } = {}): Promise<Response> {
     await this.ensurePrimed();
     if (form.has('_token')) form.set('_token', this.token);
+    const headers = this.baseHeaders('multipart');
+    if (opts.referer) headers.Referer = opts.referer;
     const res = await this.http.fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: this.baseHeaders('multipart'),
+      headers,
       body: form,
     });
     this.absorbSetCookie(res);

@@ -34,10 +34,10 @@ const server = new McpServer({
 server.tool(
   'create_campaign',
   [
-    'Create a tracking campaign end-to-end. Single call, no IDs to look up.',
-    'Required: domain, keywords, location (country name).',
-    `Optional: dashboards (defaults to ['SEO']), Google Search Console attachment by Gmail + property name.`,
-    'Use list_search_console_properties first if you need to find available GSC properties.',
+    'Create a tracking campaign end-to-end. Optionally attach any combination of',
+    'GSC, GA4, Ads and GMB at create time — each block resolves human-readable labels',
+    'to ids via the discovery tools (list_search_console_properties, list_ga4_accounts +',
+    'list_ga4_properties, list_ads_accounts, list_gmb_locations).',
   ].join(' '),
   {
     domain: z.string().describe('Domain to track. Must resolve in DNS.'),
@@ -46,7 +46,13 @@ server.tool(
       .array(z.string())
       .min(1)
       .describe(
-        `One or more country names/aliases to track. Supported: ${listSupportedCountries().join(', ')}.`,
+        `Search Location(s) — controls where Google searches from (lat/long + searchlocations[]). Country names/aliases. Supported: ${listSupportedCountries().join(', ')}.`,
+      ),
+    volumeLocations: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Optional Volume Location override (DataForSEO volume aggregation region). Country names. If omitted, mirrors locations. Length must match locations.',
       ),
     regionalDb: z
       .string()
@@ -60,15 +66,40 @@ server.tool(
     keywordTag: z.string().optional().describe('Tag for this keyword set. Defaults to domain.'),
     searchEngine: z.string().optional().describe('Override the per-country default, e.g. google.co.uk.'),
     language: z.string().default('English'),
-    device: z.enum(['desktop', 'mobile', 'tablet']).default('desktop'),
+    device: z.enum(['desktop', 'mobile']).default('desktop'),
+    serpType: z
+      .enum(['local+organic', 'organic', 'local'])
+      .default('local+organic')
+      .describe('SERP type. Maps to ignore_local_listing 0/1/2.'),
+    urlType: z
+      .enum(['Root Domain', 'Exact URL', 'Subdomain', 'Subfolder'])
+      .default('Root Domain'),
     searchConsole: z
       .object({
-        googleAccount: z
-          .string()
-          .describe('Gmail of the OAuth-connected account, e.g. "info@bpstrategists.com".'),
-        property: z
-          .string()
-          .describe('Exact GSC property string, e.g. "sc-domain:example.com".'),
+        googleAccount: z.string().describe('Gmail of the OAuth-connected account.'),
+        property: z.string().describe('GSC property label from list_search_console_properties.'),
+      })
+      .optional(),
+    ga4: z
+      .object({
+        googleAccount: z.string().describe('Gmail of the OAuth-connected account.'),
+        account: z.string().describe('GA4 account label from list_ga4_accounts.'),
+        property: z.string().describe('GA4 property label from list_ga4_properties.'),
+      })
+      .optional(),
+    ads: z
+      .object({
+        googleAccount: z.string().describe('Gmail of the OAuth-connected account.'),
+        account: z.string().describe('Ads account label from list_ads_accounts.'),
+      })
+      .optional(),
+    gmb: z
+      .object({
+        googleAccount: z.string().describe('Gmail of the OAuth-connected account.'),
+        locations: z
+          .array(z.string())
+          .min(1)
+          .describe('One or more GMB location labels from list_gmb_locations.'),
       })
       .optional(),
   },
@@ -77,6 +108,7 @@ server.tool(
       domain: input.domain,
       keywords: input.keywords,
       locations: input.locations,
+      volumeLocations: input.volumeLocations,
       regionalDb: input.regionalDb,
       projectName: input.projectName,
       dashboards: input.dashboards as DashboardName[],
@@ -84,7 +116,12 @@ server.tool(
       searchEngine: input.searchEngine,
       language: input.language,
       device: input.device as Device,
+      serpType: input.serpType,
+      urlType: input.urlType,
       searchConsole: input.searchConsole,
+      ga4: input.ga4,
+      ads: input.ads,
+      gmb: input.gmb,
     });
     return {
       content: [
@@ -114,37 +151,114 @@ server.tool(
 
 server.tool(
   'list_google_accounts',
-  'List OAuth-connected Google accounts (Gmail addresses) usable for GA4 / Search Console.',
+  [
+    'List every Google account connected to the workspace, deduplicated by gmail. Each entry includes',
+    'a `scopes` object showing which providers (ga4, searchConsole, ads, gmb) that gmail is connected for —',
+    'undefined scope = not connected. Reads live from the dashboard (combines /ajax_get_ga4_emails',
+    'and the per-provider <select> options on /add-new-campaign). For the raw per-provider pools use list_connected_emails.',
+  ].join(' '),
   {},
   async () => {
-    const res = await client.listGa4Emails(client.userId);
+    const accounts = await client.listConnectedGoogleAccounts();
+    return { content: [{ type: 'text', text: JSON.stringify(accounts, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_connected_emails',
+  [
+    'List the OAuth-connected Google accounts as the new-campaign wizard sees them, split by provider:',
+    'ga4, searchConsole, ads, gmb. Each entry is { id, label } where label is the gmail address.',
+    'Use the gmail address as input to list_search_console_properties / list_ads_accounts / list_gmb_locations / list_ga4_accounts.',
+    'No campaign id needed — pure OAuth-side discovery.',
+  ].join(' '),
+  {},
+  async () => {
+    const res = await client.listWizardEmails();
     return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
   },
 );
 
 server.tool(
   'list_search_console_properties',
-  'List Google Search Console properties available under a given OAuth account. Pass the Gmail address from list_google_accounts.',
+  'List Google Search Console properties available under a given OAuth account. Pass the Gmail address from list_connected_emails.searchConsole.',
   {
     googleAccount: z.string().describe('Gmail address, e.g. "info@bpstrategists.com".'),
   },
   async ({ googleAccount }) => {
-    const emails = await client.listGa4Emails(client.userId);
-    const email = emails.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+    const wizard = await client.listWizardEmails();
+    const email = wizard.searchConsole.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
     if (!email) {
       return {
         content: [
           {
             type: 'text',
-            text: `Account "${googleAccount}" not connected. Available: ${emails.map((e) => e.label).join(', ')}`,
+            text: `"${googleAccount}" not connected to GSC. Available: ${wizard.searchConsole.map((e) => e.label).join(', ') || '(none)'}`,
           },
         ],
       };
     }
-    // Need an existing campaign_id; use the most recent active one.
-    const campaigns = await client.listCampaigns({ limit: 1 });
-    const campaignId = campaigns.campaigns[0]?.id ?? 0;
-    const props = await client.listConsoleProperties(email.id, campaignId);
+    const props = await client.listConsoleProperties(email.id);
+    return { content: [{ type: 'text', text: JSON.stringify(props, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_ads_accounts',
+  'List Google Ads (adwords) accounts available under a given OAuth account. Pass the Gmail address from list_connected_emails.ads.',
+  {
+    googleAccount: z.string().describe('Gmail address, e.g. "info@bpstrategists.com".'),
+  },
+  async ({ googleAccount }) => {
+    const wizard = await client.listWizardEmails();
+    const email = wizard.ads.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+    if (!email) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `"${googleAccount}" not connected to Ads. Available: ${wizard.ads.map((e) => e.label).join(', ') || '(none)'}`,
+          },
+        ],
+      };
+    }
+    const accounts = await client.listAdsAccounts(email.id);
+    return { content: [{ type: 'text', text: JSON.stringify(accounts, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_ga4_accounts',
+  'First hop of GA4 discovery: list GA4 accounts under a given OAuth account. Pass the Gmail address from list_connected_emails.ga4.',
+  {
+    googleAccount: z.string().describe('Gmail address, e.g. "info@bpstrategists.com".'),
+  },
+  async ({ googleAccount }) => {
+    const wizard = await client.listWizardEmails();
+    const email = wizard.ga4.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+    if (!email) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `"${googleAccount}" not connected to GA4. Available: ${wizard.ga4.map((e) => e.label).join(', ') || '(none)'}`,
+          },
+        ],
+      };
+    }
+    const accounts = await client.listGa4Accounts(email.id);
+    return { content: [{ type: 'text', text: JSON.stringify(accounts, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_ga4_properties',
+  'Second (final) hop of GA4 discovery: list GA4 properties under a chosen GA4 account id (from list_ga4_accounts). GA4 has no "view" layer.',
+  {
+    accountId: z.number().int().describe('Numeric GA4 account id from list_ga4_accounts.'),
+  },
+  async ({ accountId }) => {
+    const props = await client.listGa4Properties(accountId);
     return { content: [{ type: 'text', text: JSON.stringify(props, null, 2) }] };
   },
 );
@@ -172,46 +286,59 @@ server.tool(
 );
 
 server.tool(
-  'list_gmb_channels',
+  'list_gmb_locations',
   [
-    'List GMB locations (channels) connected to a campaign via a given Google account.',
+    'List GMB locations under a given OAuth account. Pass the Gmail from list_connected_emails.gmb.',
     'Each returned id is the channelId required by schedule_gmb_post.',
-    'Returns [] if the account has GMB connected but no locations chosen for this campaign,',
-    'or if GMB is not connected at all on this campaign.',
+    'No campaign id needed — the dashboard returns the full pool of locations the OAuth account can manage.',
   ].join(' '),
   {
     googleAccount: z
       .string()
-      .describe('Gmail address from list_google_accounts (e.g. "info@bpstrategists.com").'),
-    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
+      .describe('Gmail address from list_connected_emails.gmb (e.g. "simon@simonbalfe.com").'),
   },
-  async ({ googleAccount, campaignId }) => {
-    const emails = await client.listGa4Emails(client.userId);
-    const email = emails.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+  async ({ googleAccount }) => {
+    const wizard = await client.listWizardEmails();
+    const email = wizard.gmb.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
     if (!email) {
       return {
         content: [
           {
             type: 'text',
-            text: `Account "${googleAccount}" not connected. Available: ${emails.map((e) => e.label).join(', ')}`,
+            text: `"${googleAccount}" not connected to GMB. Available: ${wizard.gmb.map((e) => e.label).join(', ') || '(none)'}`,
           },
         ],
       };
     }
-    const channels = await client.listGmbAccounts(email.id, campaignId);
-    return { content: [{ type: 'text', text: JSON.stringify(channels, null, 2) }] };
+    const locations = await client.listGmbAccounts(email.id);
+    return { content: [{ type: 'text', text: JSON.stringify(locations, null, 2) }] };
   },
 );
 
+// Back-compat alias: previous name expected googleAccount + campaignId.
+// campaignId is now ignored; this just delegates to list_gmb_locations.
 server.tool(
-  'get_encrypted_campaign_id',
-  'Resolve a numeric campaign id to the encrypted Laravel token needed by schedule_gmb_post and list_gmb_posts.',
+  'list_gmb_channels',
+  'DEPRECATED alias of list_gmb_locations. campaignId is now ignored.',
   {
-    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
+    googleAccount: z.string(),
+    campaignId: z.number().int().optional(),
   },
-  async ({ campaignId }) => {
-    const token = await client.getEncryptedCampaignId(campaignId);
-    return { content: [{ type: 'text', text: token }] };
+  async ({ googleAccount }) => {
+    const wizard = await client.listWizardEmails();
+    const email = wizard.gmb.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
+    if (!email) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `"${googleAccount}" not connected to GMB. Available: ${wizard.gmb.map((e) => e.label).join(', ') || '(none)'}`,
+          },
+        ],
+      };
+    }
+    const locations = await client.listGmbAccounts(email.id);
+    return { content: [{ type: 'text', text: JSON.stringify(locations, null, 2) }] };
   },
 );
 
@@ -223,14 +350,12 @@ server.tool(
     'Publish or schedule a Google Business Profile post via the agency dashboard.',
     'Uploads local image paths first, then creates the post.',
     'Set scheduleTime (YYYY-MM-DD HH:mm:ss in timeZone) to schedule, omit to publish now.',
-    'campaignId is the encrypted token string from the agency dashboard URL/page (not the numeric id).',
-    'channelId is the numeric ID of the connected GMB channel on this campaign.',
+    'campaignId is the NUMERIC campaign id from list_campaigns.',
+    'channelId is the numeric channel id from list_gmb_locations.',
   ].join(' '),
   {
-    campaignId: z
-      .string()
-      .describe('Encrypted Laravel campaignId (the long base64 token from the agency dashboard).'),
-    channelId: z.number().int().describe('Numeric channel ID for the connected GMB account.'),
+    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
+    channelId: z.number().int().describe('Numeric channel id from list_gmb_locations.'),
     text: z.string().min(1).max(1500).describe('Post body. GMB caps around 1500 characters.'),
     images: z
       .array(z.string())
@@ -281,16 +406,23 @@ server.tool(
   'list_gmb_posts',
   'List scheduled and published social posts for a campaign within a date range.',
   {
-    campaignId: z.string().describe('Encrypted Laravel campaignId from the agency dashboard.'),
+    campaignId: z.number().int().describe('Numeric campaign id from list_campaigns.'),
     startDate: z.string().describe('"YYYY-MM-DD".'),
     endDate: z.string().describe('"YYYY-MM-DD".'),
     channelId: z
       .union([z.number().int(), z.literal('all')])
       .default('all')
-      .describe('Specific channel ID, or "all".'),
+      .describe('Specific channel id, or "all".'),
   },
   async ({ campaignId, startDate, endDate, channelId }) => {
-    const res = await client.getCalendarPosts({ campaignId, startDate, endDate, channelId });
+    const encrypted = await client.getEncryptedCampaignId(campaignId);
+    const res = await client.getCalendarPosts({
+      campaignId: encrypted,
+      numericCampaignId: campaignId,
+      startDate,
+      endDate,
+      channelId,
+    });
     return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
   },
 );
