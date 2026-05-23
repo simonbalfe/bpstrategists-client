@@ -193,6 +193,35 @@ export type CampaignListResponse = {
   limit: string;
 };
 
+export type CampaignDirectoryRow = {
+  id: number;
+  domain_name: string;
+  domain_url: string;
+  regional_db: string;
+  ga4_email_id: number | null;
+  console_account_id: number | null;
+  is_connected: Record<string, boolean>;
+  [key: string]: unknown;
+};
+
+export type CampaignDirectoryResponse = {
+  data: CampaignDirectoryRow[];
+  [key: string]: unknown;
+};
+
+export type CampaignGmbLocation = { id: number; name: string };
+
+export type CampaignBindings = {
+  campaignId: number;
+  name: string;
+  domain: string;
+  ga4: { emailId: number; email: string | null } | null;
+  searchConsole: { propertyAccountId: number } | null;
+  gmb: { locations: CampaignGmbLocation[] } | null;
+  ads: { customerId: string } | null;
+  isConnected: Record<string, boolean>;
+};
+
 export type FullCampaignInput = StoreProjectInfoInput & {
   ranking: Omit<StoreRankingDetailsInput, 'projectId'>;
   integrations?: {
@@ -399,6 +428,74 @@ export class BpStrategistsClient {
     return (await this.getJson(`${path}?${qs}`)) as CampaignListResponse;
   }
 
+  // Richer per-campaign view: includes ga4_email_id, console_account_id, and
+  // is_connected.{gmb,google_ads,facebook,instagram,...} booleans.
+  async fetchCampaignDirectory(opts: { page?: number; limit?: number; query?: string; dashboardCategory?: number } = {}): Promise<CampaignDirectoryResponse> {
+    const qs = new URLSearchParams({
+      page: (opts.page ?? 1).toString(),
+      limit: (opts.limit ?? 500).toString(),
+      query: opts.query ?? '',
+      query_type: 'campaign:',
+      column_name: 'keywords',
+      order_type: 'desc',
+      dash_category: (opts.dashboardCategory ?? 1).toString(),
+    });
+    return (await this.getJson(`/ajax_fetch_campaign_datajson?${qs}`)) as CampaignDirectoryResponse;
+  }
+
+  // The PPC tab embeds the bound Google Ads customer id (CID) as
+  // `<input type="hidden" class="account_id" value="<cid>">`. CID is the
+  // dashless 10-digit Google identifier (e.g. 8108264861).
+  async getCampaignAdsCid(campaignId: number): Promise<string | null> {
+    const html = await this.getString(`/campaign_ppc_content/${campaignId}`);
+    const m = html.match(/<input[^>]+class=["']account_id["'][^>]+value=["'](\d+)["']/);
+    return m ? m[1] : null;
+  }
+
+  // The GMB tab embeds the bound location(s) as `<h3 id="activeLocationName<gmbId>">Name</h3>`.
+  async getCampaignGmbLocations(campaignId: number): Promise<CampaignGmbLocation[]> {
+    const html = await this.getString(`/campaign_gmb_content/${campaignId}`);
+    const seen = new Set<number>();
+    const out: CampaignGmbLocation[] = [];
+    for (const m of html.matchAll(/id=["']activeLocationName(\d+)["'][^>]*>([^<]+)</g)) {
+      const id = Number(m[1]);
+      if (!Number.isFinite(id) || seen.has(id)) continue;
+      const name = m[2].trim();
+      if (!name) continue;
+      seen.add(id);
+      out.push({ id, name });
+    }
+    return out;
+  }
+
+  async getCampaignBindings(opts: { campaignId?: number } = {}): Promise<CampaignBindings[]> {
+    const [dir, wizard] = await Promise.all([
+      this.fetchCampaignDirectory({ limit: 500 }),
+      this.listWizardEmails(),
+    ]);
+    const ga4ById = new Map(wizard.ga4.map((e) => [e.id, e.label] as const));
+    const rows = opts.campaignId ? dir.data.filter((r) => r.id === opts.campaignId) : dir.data;
+    const out: CampaignBindings[] = [];
+    for (const row of rows) {
+      const isConnected = row.is_connected ?? {};
+      const [locs, cid] = await Promise.all([
+        isConnected.gmb ? this.getCampaignGmbLocations(row.id) : Promise.resolve([] as CampaignGmbLocation[]),
+        isConnected.google_ads ? this.getCampaignAdsCid(row.id) : Promise.resolve(null),
+      ]);
+      out.push({
+        campaignId: row.id,
+        name: row.domain_name,
+        domain: row.domain_url,
+        ga4: row.ga4_email_id ? { emailId: row.ga4_email_id, email: ga4ById.get(row.ga4_email_id) ?? null } : null,
+        searchConsole: row.console_account_id ? { propertyAccountId: row.console_account_id } : null,
+        gmb: locs.length ? { locations: locs } : null,
+        ads: cid ? { customerId: cid } : null,
+        isConnected,
+      });
+    }
+    return out;
+  }
+
   async checkDomainName(name: string, userId: number): Promise<unknown> {
     return this.getJson(`/checkDomainName?search=${encodeURIComponent(name)}&user_id=${userId}`);
   }
@@ -555,7 +652,12 @@ export class BpStrategistsClient {
         if (i < delays.length) await new Promise((r) => setTimeout(r, delays[i]));
       }
     }
-    throw lastErr;
+    // step=4 (Ads) 500s server-side; the real browser wizard also hits this and ignores it.
+    if (step === 4) return;
+    throw new Error(
+      `complete_steps step=${step} for project=${projectId} returned HTTP 500 after retries. ` +
+        `Original: ${(lastErr as Error)?.message ?? lastErr}`,
+    );
   }
 
   /**
@@ -796,6 +898,14 @@ export class BpStrategistsClient {
       await this.completeSteps(projectId, 2);
     }
 
+    if (input.ads) {
+      const email = pickEmail('ads', input.ads.googleAccount);
+      const accounts = await this.listAdsAccounts(email.id, projectId);
+      const account = pickAccount(accounts, input.ads.account, 'Ads account');
+      await this.attachAds({ campaignId: projectId, email: email.id, account: account.id });
+      await this.completeSteps(projectId, 4);
+    }
+
     if (input.ga4) {
       const email = pickEmail('ga4', input.ga4.googleAccount);
       const accounts = await this.listGa4Accounts(email.id);
@@ -808,21 +918,29 @@ export class BpStrategistsClient {
         account: account.id,
         property: property.id,
       });
-      await this.completeSteps(projectId, 3);
-    }
-
-    if (input.ads) {
-      const email = pickEmail('ads', input.ads.googleAccount);
-      const accounts = await this.listAdsAccounts(email.id, projectId);
-      const account = pickAccount(accounts, input.ads.account, 'Ads account');
-      await this.attachAds({ campaignId: projectId, email: email.id, account: account.id });
-      await this.completeSteps(projectId, 4);
+      await this.completeSteps(projectId, 5);
     }
 
     if (input.gmb) {
       const email = pickEmail('gmb', input.gmb.googleAccount);
       const locations = await this.listGmbAccounts(email.id, projectId);
-      const picked = input.gmb.locations.map((name) => pickAccount(locations, name, 'GMB location').id);
+      // Wizard labels look like "HermesOps (14624712567507918236)". Allow callers
+      // to pass either the full label or the bare name (everything before the trailing parens).
+      const stripChannelId = (s: string) => s.replace(/\s*\(\d+\)\s*$/, '').trim();
+      const picked = input.gmb.locations.map((name) => {
+        const wanted = name.toLowerCase();
+        const wantedBare = stripChannelId(name).toLowerCase();
+        const hit = locations.find((o) => {
+          const lbl = o.label.toLowerCase();
+          return lbl === wanted || stripChannelId(o.label).toLowerCase() === wantedBare;
+        });
+        if (!hit) {
+          throw new Error(
+            `GMB location "${name}" not found. Available: ${locations.map((o) => o.label).join(', ') || '(none)'}`,
+          );
+        }
+        return hit.id;
+      });
       await this.attachGmb({ campaignId: projectId, email: email.id, accounts: picked });
       // GMB has no completeSteps in the wizard — ajax_update_gmb_data is the final write.
     }

@@ -150,6 +150,24 @@ server.tool(
 );
 
 server.tool(
+  'list_campaign_bindings',
+  [
+    'List per-campaign integration bindings: GA4 (email id + gmail), Search Console (account/property id),',
+    'GMB (location id + name), plus is_connected booleans for every social provider.',
+    'Reads ajax_fetch_campaign_datajson for the structured fields, and scrapes /campaign_gmb_content/<id>',
+    'to recover the bound GMB location id(s) — the structured endpoint only returns a boolean for GMB.',
+    'If campaignId is provided, returns just that campaign.',
+  ].join(' '),
+  {
+    campaignId: z.number().int().optional().describe('Optional. If set, only this campaign is returned.'),
+  },
+  async ({ campaignId }) => {
+    const res = await client.getCampaignBindings({ campaignId });
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
   'list_google_accounts',
   [
     'List every Google account connected to the workspace, deduplicated by gmail. Each entry includes',
