@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import './env.ts'; // load .env from this repo, override shell env
+import { loadEnv } from './env.ts'; // load .env from this repo, override shell env
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -12,14 +12,39 @@ import {
 } from './client.ts';
 import { listSupportedCountries } from './locations.ts';
 
-const token = process.env.BP_TOKEN;
-const sessionCookie = process.env.BP_SESSION;
-if (!token || !sessionCookie) {
+if (!process.env.BP_TOKEN || !process.env.BP_SESSION) {
   console.error('Missing BP_TOKEN or BP_SESSION in ./.env. Run `bun run login`.');
   process.exit(1);
 }
 
-const client = new BpStrategistsClient({ token, sessionCookie });
+// The MCP process is long-lived. `bun run login` rewrites BP_TOKEN/BP_SESSION
+// in ./.env while we run, so we re-read .env on every tool call and rebuild
+// the underlying client when the values change. Handlers below see this proxy
+// as if it were a normal BpStrategistsClient.
+let realClient = new BpStrategistsClient({
+  token: process.env.BP_TOKEN,
+  sessionCookie: process.env.BP_SESSION,
+});
+let cachedToken = process.env.BP_TOKEN;
+let cachedSession = process.env.BP_SESSION;
+
+const client = new Proxy({} as BpStrategistsClient, {
+  get(_target, prop) {
+    loadEnv();
+    const t = process.env.BP_TOKEN;
+    const s = process.env.BP_SESSION;
+    if (!t || !s) {
+      throw new Error('Missing BP_TOKEN or BP_SESSION in ./.env. Run `bun run login`.');
+    }
+    if (t !== cachedToken || s !== cachedSession) {
+      realClient = new BpStrategistsClient({ token: t, sessionCookie: s });
+      cachedToken = t;
+      cachedSession = s;
+    }
+    const value = (realClient as unknown as Record<string | symbol, unknown>)[prop];
+    return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(realClient) : value;
+  },
+});
 
 const server = new McpServer({
   name: 'bpstrategists',
