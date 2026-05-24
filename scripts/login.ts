@@ -20,7 +20,7 @@ const SUBDOMAIN = 'https://bpstrategists.agencydashboard.io';
 const email = process.env.BP_EMAIL;
 const password = process.env.BP_PASSWORD;
 if (!email || !password) {
-  console.error('Missing BP_EMAIL or BP_PASSWORD in .env. See .env.example.');
+  console.error('Missing BP_EMAIL or BP_PASSWORD in .env. See CLAUDE.md for the .env layout.');
   process.exit(1);
 }
 

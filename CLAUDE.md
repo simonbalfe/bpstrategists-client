@@ -11,7 +11,6 @@ If the MCP server isn't connected and `./.env` doesn't exist, this is the full p
    BP_PASSWORD=yourpassword
    BP_TOKEN=
    BP_SESSION=
-   BP_USER_ID=
    ```
 3. **Mint tokens.** `bun run login`. Rewrites `BP_TOKEN` and `BP_SESSION` in `./.env`. Good for ~24h.
 4. **Wire the MCP server into the host** (only once per host). Claude Code does NOT auto-discover MCP servers when you `cd` into a repo. The server has to be installed explicitly. Three install paths:
@@ -48,7 +47,11 @@ If the MCP server isn't connected and `./.env` doesn't exist, this is the full p
 
 ## Auth tokens (BP_TOKEN, BP_SESSION)
 
-`bun run login` is the only supported way to mint fresh `BP_TOKEN` and `BP_SESSION`. It reads inputs from `./.env` and writes outputs back to the same file. There is no CLI arg path.
+Two supported paths to populate `BP_TOKEN` + `BP_SESSION`. Pick one.
+
+### Path A — credential login (default)
+
+`bun run login` reads `BP_EMAIL` + `BP_PASSWORD` from `./.env`, hits the SSO login flow, and writes fresh `BP_TOKEN` + `BP_SESSION` back to the same file. There is no CLI arg path.
 
 Flow when refreshing auth:
 
@@ -68,7 +71,32 @@ When you **do** still need to reset the MCP server:
 - The MCP process died or was killed (`ps -ef | grep "bun.*mcp.ts"` to check).
 - Reset = `/mcp` in Claude Code → reconnect `bpstrategists`, or in any other host kill and let it respawn.
 
-Rules:
+### Path B — paste session cookie from browser
+
+Use when you can't / don't want to type credentials (SSO, 2FA, Cloudflare flaking the login flow, or just already-logged-in in a tab). You paste the session cookie; a one-liner derives the CSRF token from it.
+
+1. **Grab the session cookie.** Browser DevTools → Application → Cookies → `bpstrategists.agencydashboard.io` → copy the value of `agency_dashboard_session`. That one cookie is the entire auth — `XSRF-TOKEN`, analytics cookies, and Google cookies are irrelevant.
+2. **Paste into `./.env`:**
+   ```
+   BP_SESSION="agency_dashboard_session=<paste here>"
+   BP_TOKEN=
+   ```
+3. **Derive the CSRF token.** GET the dashboard with that cookie, scrape `<meta name="csrf-token">`, paste into `BP_TOKEN`. One-liner (run from repo root):
+   ```bash
+   curl -s -H "Cookie: $(grep -E '^BP_SESSION=' .env | cut -d= -f2- | tr -d '"')" \
+     https://bpstrategists.agencydashboard.io/dashboard \
+     | grep -oE 'name="csrf-token" content="[^"]+"' | cut -d'"' -f4
+   ```
+   Copy the printed value into `BP_TOKEN=` in `./.env`.
+4. **Verify.** Call any MCP tool. The MCP server hot-reloads `./.env`; no reconnect needed.
+
+Why this works: `BP_SESSION` (cookie) authenticates the user; `BP_TOKEN` (CSRF) only matters for POST/PUT/DELETE. The cookie and the scraped token end up bound to the same Laravel session, so both reads and writes work.
+
+Caveats:
+- The cookie expires ~24h after the browser issued it. When calls 401, repeat step 1-3 (or fall back to Path A).
+- If the curl in step 3 returns nothing, your cookie is probably dead — the server 302'd you to login.
+
+### Rules (apply to both paths)
 
 - Never pass credentials to `login.ts` via shell env, flags, or stdin. Always go through `./.env`.
 - `./.env` is gitignored. Never commit it. Never paste real cookies into docs.
