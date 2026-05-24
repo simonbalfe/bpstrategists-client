@@ -222,16 +222,6 @@ export type CampaignBindings = {
   isConnected: Record<string, boolean>;
 };
 
-export type FullCampaignInput = StoreProjectInfoInput & {
-  ranking: Omit<StoreRankingDetailsInput, 'projectId'>;
-  integrations?: {
-    searchConsole?: { email: number; account: number };
-    ads?: { email: number; account: number };
-    gmb?: { email: number; accounts: number[] };
-    ga4?: { email: number; account: number; property: number };
-  };
-};
-
 export type WizardEmailOptions = {
   /** OAuth accounts with GA4 scope. Sourced from /ajax_get_ga4_emails (the wizard's own GA4 section uses this endpoint, not a server-rendered select). */
   ga4: GoogleAccountOption[];
@@ -781,18 +771,6 @@ export class BpStrategistsClient {
     return this.postJson('/ajax_save_new_project_console_data', this.integrationBody(input));
   }
 
-  async updateSearchConsole(input: AttachIntegrationInput): Promise<unknown> {
-    return this.postJson('/ajax_update_console_data', this.integrationBody(input));
-  }
-
-  async disconnectSearchConsole(campaignId: number): Promise<unknown> {
-    const body = new URLSearchParams({
-      request_id: campaignId.toString(),
-      _token: this.token,
-    });
-    return this.postJson('/ajax_disconnect_console', body);
-  }
-
   async attachAds(input: AttachIntegrationInput): Promise<unknown> {
     return this.postJson('/ajax_save_new_project_adwords_data', this.integrationBody(input));
   }
@@ -985,29 +963,6 @@ export class BpStrategistsClient {
     const project = await this.storeProjectInfo(input);
     await this.completeSteps(project.last_id, 1);
     return project.last_id;
-  }
-
-  async createFullCampaign(input: FullCampaignInput): Promise<number> {
-    const projectId = await this.createCampaignShell(input);
-
-    if (input.integrations?.searchConsole) {
-      await this.attachSearchConsole({
-        campaignId: projectId,
-        ...input.integrations.searchConsole,
-      });
-      await this.completeSteps(projectId, 2);
-    }
-
-    const ranking = await this.storeRankingDetails({ ...input.ranking, projectId });
-    await this.bindNewProjectKeywords({
-      projectId,
-      finalKeywords: ranking.keyword_field ?? input.ranking.keywords,
-      region: ranking.region ?? input.ranking.searchEngine,
-      ignoreLocalListing: (Number(ranking.ignore_local_listing ?? input.ranking.ignoreLocalListing) || 0) as 0 | 1 | 2,
-      tagId: ranking.tag_id ?? '',
-      locations: input.ranking.locations,
-    });
-    return projectId;
   }
 
   // -------- GMB / social posting --------

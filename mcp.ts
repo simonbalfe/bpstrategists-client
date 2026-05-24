@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { loadEnv } from './env.ts'; // load .env from this repo, override shell env
+import { loadEnv } from './env.ts';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -11,38 +11,35 @@ import {
   type GmbSectionType,
 } from './client.ts';
 import { listSupportedCountries } from './locations.ts';
+import { setAuthFromCookie } from './auth.ts';
 
-if (!process.env.BP_TOKEN || !process.env.BP_SESSION) {
-  console.error('Missing BP_TOKEN or BP_SESSION in ./.env. Run `bun run login`.');
-  process.exit(1);
+const NO_AUTH_MESSAGE =
+  'Not authenticated. Ask the user to open https://bpstrategists.agencydashboard.io in their browser, ' +
+  'log in if needed, then DevTools -> Application -> Cookies -> copy the value of `agency_dashboard_session`. ' +
+  'Pass that value to the `set_auth` tool.';
+
+let realClient: BpStrategistsClient | null = null;
+let cachedToken: string | undefined;
+let cachedSession: string | undefined;
+
+function requireClient(): BpStrategistsClient {
+  loadEnv();
+  const t = process.env.BP_CSRF_TOKEN;
+  const s = process.env.BP_AGENCY_SESSION;
+  if (!t || !s) throw new Error(NO_AUTH_MESSAGE);
+  if (!realClient || t !== cachedToken || s !== cachedSession) {
+    realClient = new BpStrategistsClient({ token: t, sessionCookie: s });
+    cachedToken = t;
+    cachedSession = s;
+  }
+  return realClient;
 }
-
-// The MCP process is long-lived. `bun run login` rewrites BP_TOKEN/BP_SESSION
-// in ./.env while we run, so we re-read .env on every tool call and rebuild
-// the underlying client when the values change. Handlers below see this proxy
-// as if it were a normal BpStrategistsClient.
-let realClient = new BpStrategistsClient({
-  token: process.env.BP_TOKEN,
-  sessionCookie: process.env.BP_SESSION,
-});
-let cachedToken = process.env.BP_TOKEN;
-let cachedSession = process.env.BP_SESSION;
 
 const client = new Proxy({} as BpStrategistsClient, {
   get(_target, prop) {
-    loadEnv();
-    const t = process.env.BP_TOKEN;
-    const s = process.env.BP_SESSION;
-    if (!t || !s) {
-      throw new Error('Missing BP_TOKEN or BP_SESSION in ./.env. Run `bun run login`.');
-    }
-    if (t !== cachedToken || s !== cachedSession) {
-      realClient = new BpStrategistsClient({ token: t, sessionCookie: s });
-      cachedToken = t;
-      cachedSession = s;
-    }
-    const value = (realClient as unknown as Record<string | symbol, unknown>)[prop];
-    return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(realClient) : value;
+    const c = requireClient();
+    const value = (c as unknown as Record<string | symbol, unknown>)[prop];
+    return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(c) : value;
   },
 });
 
@@ -51,7 +48,35 @@ const server = new McpServer({
   version: '0.3.0',
 });
 
-// --- The one tool that matters ---
+server.tool(
+  'set_auth',
+  [
+    'One-time auth bootstrap. Takes the `agency_dashboard_session` cookie value from the user\'s browser,',
+    'scrapes the matching CSRF token, and persists both to ./.env. After this succeeds, every other tool',
+    'works immediately. Re-run when calls start returning 401 (the cookie lasts ~24h).',
+    'How to get the cookie value: open https://bpstrategists.agencydashboard.io in a browser, log in,',
+    'DevTools -> Application -> Cookies -> copy the value of `agency_dashboard_session`.',
+  ].join(' '),
+  {
+    cookie: z
+      .string()
+      .min(1)
+      .describe(
+        'Either the bare cookie value, or the full `agency_dashboard_session=<value>` pair. Whitespace is trimmed.',
+      ),
+  },
+  async ({ cookie }) => {
+    const { token, envPath } = await setAuthFromCookie(cookie);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Authenticated. CSRF token starts with ${token.slice(0, 12)}.... Persisted to ${envPath}.`,
+        },
+      ],
+    };
+  },
+);
 
 server.tool(
   'create_campaign',
@@ -155,8 +180,6 @@ server.tool(
     };
   },
 );
-
-// --- Discovery (only the bits a caller can't already know) ---
 
 server.tool(
   'list_campaigns',
@@ -354,35 +377,6 @@ server.tool(
     return { content: [{ type: 'text', text: JSON.stringify(locations, null, 2) }] };
   },
 );
-
-// Back-compat alias: previous name expected googleAccount + campaignId.
-// campaignId is now ignored; this just delegates to list_gmb_locations.
-server.tool(
-  'list_gmb_channels',
-  'DEPRECATED alias of list_gmb_locations. campaignId is now ignored.',
-  {
-    googleAccount: z.string(),
-    campaignId: z.number().int().optional(),
-  },
-  async ({ googleAccount }) => {
-    const wizard = await client.listWizardEmails();
-    const email = wizard.gmb.find((e) => e.label.toLowerCase() === googleAccount.toLowerCase());
-    if (!email) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `"${googleAccount}" not connected to GMB. Available: ${wizard.gmb.map((e) => e.label).join(', ') || '(none)'}`,
-          },
-        ],
-      };
-    }
-    const locations = await client.listGmbAccounts(email.id);
-    return { content: [{ type: 'text', text: JSON.stringify(locations, null, 2) }] };
-  },
-);
-
-// --- GMB social posting (agency dashboard) ---
 
 server.tool(
   'schedule_gmb_post',

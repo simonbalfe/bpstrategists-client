@@ -1,37 +1,25 @@
 #!/usr/bin/env bun
-// Auto-login: email + password -> fresh BP_TOKEN + BP_SESSION written back to .env.
-//
-// Flow (reconstructed from login.har at the repo root):
-//   1. GET  https://agencydashboard.io/                -> seeds XSRF-TOKEN + agency_dashboard_session on the marketing domain, exposes the CSRF _token via <meta>.
-//   2. POST https://agencydashboard.io/ajax-do-login   -> email + password + _token. Responds with JSON containing the SSO bridge URL.
-//   3. GET  <bridge URL on bpstrategists.agencydashboard.io/dashboard/<encrypted>> -> 302 to /dashboard, sets the subdomain XSRF-TOKEN + agency_dashboard_session.
-//   4. GET  https://bpstrategists.agencydashboard.io/dashboard -> final landing; scrape the fresh CSRF token from <meta name="csrf-token">.
-//
-// Laravel session cookies on this app expire ~24h after issue, so re-run when you start hitting 401s.
-
-import '../env.ts';
+import { writeEnvVars } from '../env.ts';
 import { Impit } from 'impit';
-import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const LANDING = 'https://agencydashboard.io';
 const SUBDOMAIN = 'https://bpstrategists.agencydashboard.io';
+const UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
-const email = process.env.BP_EMAIL;
-const password = process.env.BP_PASSWORD;
+const email = process.argv[2] ?? process.env.BP_EMAIL;
+const password = process.argv[3] ?? process.env.BP_PASSWORD;
 if (!email || !password) {
-  console.error('Missing BP_EMAIL or BP_PASSWORD in .env. See CLAUDE.md for the .env layout.');
+  console.error('Usage: bun run login <email> <password>');
+  console.error('Or set BP_EMAIL and BP_PASSWORD in ./.env');
   process.exit(1);
 }
 
 const http = new Impit({ browser: 'chrome' });
 const jar = new Map<string, { value: string; domain: string }>();
 
-const UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
-
-// ---------- step 1: prime CSRF on agencydashboard.io ----------
-console.log('1. GET ' + LANDING + '/');
+console.log(`[1/6] GET ${LANDING}/`);
 const landing = await fetchWithJar(`${LANDING}/`, {
   method: 'GET',
   headers: {
@@ -43,16 +31,15 @@ const landing = await fetchWithJar(`${LANDING}/`, {
     'Sec-Fetch-Site': 'none',
   },
 });
-assertOk(landing, `GET ${LANDING}/`);
+if (!landing.ok) die(`GET ${LANDING}/ returned HTTP ${landing.status}. Body preview:\n${(await landing.text()).slice(0, 400)}`);
 const landingHtml = await landing.text();
 const csrfMeta = landingHtml.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/i);
-if (!csrfMeta) throw new Error('Could not scrape <meta name="csrf-token"> from landing page.');
+if (!csrfMeta) die(`No <meta name="csrf-token"> on ${LANDING}/. First 500 chars of body:\n${landingHtml.slice(0, 500)}`);
 const loginToken = csrfMeta[1];
-console.log('   csrf meta:', loginToken.slice(0, 16) + '...');
-console.log('   jar:', cookieNames());
+console.log(`      csrf meta = ${loginToken.slice(0, 16)}...`);
+console.log(`      cookies   = ${cookieNames() || '(none)'}`);
 
-// ---------- step 2: POST /ajax-do-login ----------
-console.log('2. POST ' + LANDING + '/ajax-do-login');
+console.log(`[2/6] POST ${LANDING}/ajax-do-login`);
 const loginBody = new URLSearchParams({ email, password, _token: loginToken });
 const loginRes = await fetchWithJar(`${LANDING}/ajax-do-login`, {
   method: 'POST',
@@ -70,32 +57,35 @@ const loginRes = await fetchWithJar(`${LANDING}/ajax-do-login`, {
   },
   body: loginBody.toString(),
 });
-assertOk(loginRes, 'POST /ajax-do-login');
-const loginJsonText = await loginRes.text();
+const loginText = await loginRes.text();
+if (!loginRes.ok) die(`POST /ajax-do-login returned HTTP ${loginRes.status}. Body:\n${loginText.slice(0, 600)}`);
+
 let loginJson: Record<string, unknown>;
 try {
-  loginJson = JSON.parse(loginJsonText);
+  loginJson = JSON.parse(loginText);
 } catch {
-  throw new Error(`ajax-do-login did not return JSON: ${loginJsonText.slice(0, 200)}`);
+  die(`/ajax-do-login did not return JSON. Body:\n${loginText.slice(0, 600)}`);
 }
-console.log('   response keys:', Object.keys(loginJson).join(', '));
+console.log(`      response keys = ${Object.keys(loginJson).join(', ') || '(none)'}`);
 
-// The response shape isn't in the HAR (Chrome strips bodies). Cover the common shapes.
-const bridgeUrl = extractBridgeUrl(loginJson, loginJsonText);
+if (loginJson.status === false || loginJson.success === false || loginJson.error) {
+  die(`/ajax-do-login returned an error response. Body:\n${JSON.stringify(loginJson, null, 2)}`);
+}
+
+const bridgeUrl = extractBridgeUrl(loginJson, loginText);
 if (!bridgeUrl) {
-  throw new Error(
-    `Could not find SSO bridge URL in login response. Full body:\n${loginJsonText}\n\n` +
-      `Expected a key like "url" / "redirect" / "redirect_url" pointing at ${SUBDOMAIN}/dashboard/<encrypted>.`,
+  die(
+    `Could not find SSO bridge URL in login response. Looked under: url, redirect, redirect_url, redirectUrl, location, data.url, data.redirect.\n` +
+      `Full body:\n${loginText}`,
   );
 }
-console.log('   bridge:', bridgeUrl.slice(0, 90) + '...');
+console.log(`      bridge = ${bridgeUrl.slice(0, 100)}...`);
 
-// ---------- step 3: follow the SSO bridge manually so we capture every Set-Cookie hop ----------
-// Bridge -> 302 to /dashboard -> 200 HTML. The final HTML has the fresh CSRF token we need.
+console.log(`[3/6] Following SSO bridge redirects`);
 let currentUrl = bridgeUrl;
 let dashHtml: string | null = null;
 for (let hop = 0; hop < 5; hop++) {
-  console.log(`3.${hop + 1} GET ${currentUrl.slice(0, 100)}`);
+  console.log(`      hop ${hop + 1}: GET ${currentUrl.slice(0, 100)}`);
   const res = await fetchWithJar(currentUrl, {
     method: 'GET',
     headers: {
@@ -112,48 +102,51 @@ for (let hop = 0; hop < 5; hop++) {
   });
   if (res.status >= 300 && res.status < 400) {
     const next = res.headers.get('location');
-    if (!next) throw new Error(`Redirect with no Location header at ${currentUrl}`);
+    if (!next) die(`Redirect with no Location header at ${currentUrl} (status ${res.status})`);
     currentUrl = new URL(next, currentUrl).toString();
     continue;
   }
-  if (!res.ok) throw new Error(`Bridge GET failed: ${res.status} ${currentUrl}`);
+  if (!res.ok) die(`Bridge GET failed: HTTP ${res.status} at ${currentUrl}\nBody:\n${(await res.text()).slice(0, 400)}`);
   dashHtml = await res.text();
   break;
 }
-if (!dashHtml) throw new Error('Bridge chain exceeded 5 hops without landing on a 2xx.');
-console.log('   jar after bridge:', cookieNames());
+if (!dashHtml) die('Bridge chain exceeded 5 hops without landing on a 2xx response.');
+console.log(`      cookies = ${cookieNames()}`);
 
-// ---------- step 4: scrape fresh CSRF from /dashboard HTML ----------
+console.log(`[4/6] Scrape CSRF from /dashboard`);
 const dashCsrf = dashHtml.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/i);
-if (!dashCsrf) throw new Error('Could not scrape <meta name="csrf-token"> from /dashboard. Login likely failed.');
+if (!dashCsrf) die(`No <meta name="csrf-token"> on /dashboard. First 500 chars:\n${dashHtml.slice(0, 500)}`);
 const finalToken = dashCsrf[1];
-console.log('4. final csrf:', finalToken.slice(0, 16) + '...');
+console.log(`      csrf = ${finalToken.slice(0, 16)}...`);
 
-// ---------- step 5: build BP_SESSION (subdomain-scoped cookies only) ----------
+console.log(`[5/6] Build BP_AGENCY_SESSION from cookie jar`);
 const subdomainCookies = [...jar.entries()]
   .filter(([, v]) => v.domain.endsWith('bpstrategists.agencydashboard.io'))
   .map(([k, v]) => `${k}=${v.value}`)
   .join('; ');
 if (!/agency_dashboard_session=/.test(subdomainCookies) || !/XSRF-TOKEN=/.test(subdomainCookies)) {
-  throw new Error(
-    `Missing expected session cookies on bpstrategists subdomain. Got: ${subdomainCookies || '(none)'}`,
+  die(
+    `Missing expected session cookies on bpstrategists subdomain. Got:\n  ${subdomainCookies || '(none)'}\nFull jar:\n  ${[...jar.entries()].map(([k, v]) => `${k}@${v.domain}=${v.value.slice(0, 24)}...`).join('\n  ')}`,
   );
 }
-console.log('   session cookies:', subdomainCookies.split(';').map((c) => c.trim().split('=')[0]).join(', '));
+console.log(`      session cookies = ${subdomainCookies.split(';').map((c) => c.trim().split('=')[0]).join(', ')}`);
 
-// ---------- step 6: persist to .env ----------
+console.log(`[6/6] Write tokens to ./.env`);
 const envPath = join(import.meta.dir, '..', '.env');
-const before = readFileSync(envPath, 'utf8');
-const after = upsertEnvVars(before, {
-  BP_TOKEN: finalToken,
-  BP_SESSION: subdomainCookies,
+writeEnvVars(envPath, {
+  BP_EMAIL: email,
+  BP_PASSWORD: password,
+  BP_CSRF_TOKEN: finalToken,
+  BP_AGENCY_SESSION: subdomainCookies,
 });
-writeFileSync(envPath, after);
-console.log('\n.env updated: BP_TOKEN, BP_SESSION');
+console.log(`      wrote ${envPath}`);
 
-// ============================================================
-// helpers
-// ============================================================
+console.log(`\nLogin OK. Tokens persisted to ${envPath}.`);
+
+function die(msg: string): never {
+  console.error(`\nFAILED: ${msg}`);
+  process.exit(1);
+}
 
 function cookieNames(): string {
   return [...jar.entries()].map(([k, v]) => `${k}@${shortDomain(v.domain)}`).join(', ');
@@ -167,9 +160,9 @@ async function fetchWithJar(url: string, init: RequestInit): Promise<Response> {
   const cookieHeader = buildCookieHeader(url);
   const headers = new Headers(init.headers);
   if (cookieHeader) headers.set('Cookie', cookieHeader);
-  const res = await http.fetch(url, { ...init, headers });
-  absorbSetCookie(res, url);
-  return res;
+  const res = await http.fetch(url, { ...init, headers } as unknown as Parameters<typeof http.fetch>[1]);
+  absorbSetCookie(res as unknown as Response, url);
+  return res as unknown as Response;
 }
 
 function buildCookieHeader(url: string): string {
@@ -212,10 +205,6 @@ function absorbSetCookie(res: Response, requestUrl: string): void {
   }
 }
 
-function assertOk(res: Response, label: string): void {
-  if (!res.ok) throw new Error(`${label} -> HTTP ${res.status}`);
-}
-
 function extractBridgeUrl(json: Record<string, unknown>, raw: string): string | null {
   const candidates: unknown[] = [
     json.url,
@@ -229,33 +218,8 @@ function extractBridgeUrl(json: Record<string, unknown>, raw: string): string | 
   for (const c of candidates) {
     if (typeof c === 'string' && /bpstrategists\.agencydashboard\.io\/dashboard\//.test(c)) return c;
   }
-  // Fall back: scan the entire body for the dashboard/<encrypted> pattern.
   const m = raw.match(/https?:\\?\/\\?\/bpstrategists\.agencydashboard\.io\\?\/dashboard\\?\/[A-Za-z0-9+/=]+/);
   if (m) return m[0].replace(/\\\//g, '/');
   return null;
 }
 
-function upsertEnvVars(text: string, updates: Record<string, string>): string {
-  const lines = text.split('\n');
-  const remaining = new Set(Object.keys(updates));
-  const out = lines.map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return line;
-    const eq = trimmed.indexOf('=');
-    if (eq < 0) return line;
-    const key = trimmed.slice(0, eq).trim();
-    if (!(key in updates)) return line;
-    remaining.delete(key);
-    return `${key}=${quoteIfNeeded(updates[key])}`;
-  });
-  for (const key of remaining) {
-    out.push(`${key}=${quoteIfNeeded(updates[key])}`);
-  }
-  return out.join('\n');
-}
-
-function quoteIfNeeded(value: string): string {
-  // BP_SESSION contains '; ' which is safe unquoted for env.ts (it splits on first '=' only),
-  // but quote anything containing whitespace just in case the file is sourced by a shell.
-  return /[\s"'#]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
-}

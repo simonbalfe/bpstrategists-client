@@ -1,102 +1,30 @@
-# bpstrategists-client agent rules
+# bpstrategists-client — agent rules
 
-## Zero-to-working in one go
+See `README.md` for the human-facing overview (what the tools do, setup commands, troubleshooting). This file is the agent-only layer on top.
 
-If the MCP server isn't connected and `./.env` doesn't exist, this is the full path. Stop at the first step that's already done.
+## What this is
 
-1. **Install deps.** `bun install` from the repo root. Needs Bun (`curl -fsSL https://bun.sh/install | bash`).
-2. **Seed `./.env`.** Create it with just the login credentials. The token/session lines can stay empty; `bun run login` fills them.
-   ```
-   BP_EMAIL=you@example.com
-   BP_PASSWORD=yourpassword
-   BP_TOKEN=
-   BP_SESSION=
-   ```
-3. **Mint tokens.** `bun run login`. Rewrites `BP_TOKEN` and `BP_SESSION` in `./.env`. Good for ~24h.
-4. **Wire the MCP server into the host** (only once per host). Claude Code does NOT auto-discover MCP servers when you `cd` into a repo. The server has to be installed explicitly. Three install paths:
-   1. **`claude mcp add` (CLI):**
-      ```
-      claude mcp add --transport stdio bpstrategists -- bun run /absolute/path/to/bpstrategists-client/mcp.ts
-      ```
-      Default scope is `local` (current project, private, lives in `~/.claude.json`). Override with `--scope project|user|local`:
-      - `local` (default): current project, private to you.
-      - `project`: writes a `.mcp.json` at the repo root, shared with the team via git. First use triggers a one-time trust dialog. Reset with `claude mcp reset-project-choices`.
-      - `user`: available across all your projects, private to you.
-   2. **Commit a `.mcp.json` at the repo root** (project-scoped, shared with the team via git):
-      ```json
-      {
-        "mcpServers": {
-          "bpstrategists": {
-            "type": "stdio",
-            "command": "bun",
-            "args": ["run", "/absolute/path/to/bpstrategists-client/mcp.ts"],
-            "env": { "EXAMPLE_KEY": "value" }
-          }
-        }
-      }
-      ```
-      `CLAUDE_PROJECT_DIR` is auto-injected into the server's env, so a relative path works if teammates clone to a consistent spot. The `env` field is optional and not needed for this server (it reads `./.env` itself). Project-scoped servers trigger a one-time trust dialog on first use; reset with `claude mcp reset-project-choices`.
-   3. **Manually edit `~/.claude.json`** (user-scoped, applies across all your projects). Same `mcpServers` block as above. Equivalent to `claude mcp add --scope user`.
-   - Claude Desktop (not Claude Code): edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) with the same `mcpServers` block (omit `"type": "stdio"`).
-   - Cursor (not Claude Code): same `mcpServers` block in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global).
-   - Reference: https://code.claude.com/docs/en/mcp.md
-5. **Reconnect once.** Restart the host, or `/mcp` then reconnect `bpstrategists` in Claude Code. From then on it auto-starts with the host.
-6. **Verify.** Call any MCP tool (e.g. `list_campaigns`). 200 means working.
+MCP server that drives the BP Strategists agency dashboard. `bun install` does the full setup: postinstall hook runs `scripts/setup.ts`, which prompts for auth method (email+password OR cookie paste OR skip), writes tokens to `./.env`, and registers the MCP at user scope. Loads in every Claude Code session on this machine regardless of cwd.
 
-`bun` must be on the host's `PATH` (`which bun` to confirm). The server reads `./.env` from the repo it runs out of, so no env vars need to be passed via the host config.
+## Auth
 
-## Auth tokens (BP_TOKEN, BP_SESSION)
+Two paths, both write `BP_CSRF_TOKEN` + `BP_AGENCY_SESSION` to `./.env`. Tokens last ~24h.
 
-Two supported paths to populate `BP_TOKEN` + `BP_SESSION`. Pick one.
+- **Credential login** (primary): `bun run login` reads `BP_EMAIL`+`BP_PASSWORD` from `./.env` and mints fresh tokens via the dashboard's `/ajax-do-login` endpoint. First-time use during `bun install` prompts interactively.
+- **Cookie paste** (fallback): `bun run login:cookie '<value>'` or the `set_auth` MCP tool accepts the `agency_dashboard_session` cookie value from the user's browser. Use this when credential login is blocked (SSO, 2FA, Cloudflare). Steps: open https://bpstrategists.agencydashboard.io in the user's browser → DevTools → Application → Cookies → copy `agency_dashboard_session` value.
 
-### Path A — credential login (default)
-
-`bun run login` reads `BP_EMAIL` + `BP_PASSWORD` from `./.env`, hits the SSO login flow, and writes fresh `BP_TOKEN` + `BP_SESSION` back to the same file. There is no CLI arg path.
-
-Flow when refreshing auth:
-
-1. Edit `./.env` so `BP_EMAIL` and `BP_PASSWORD` hold the credentials you want to log in with. Existing `BP_TOKEN` / `BP_SESSION` can stay; they'll be overwritten.
-2. Read `./.env` back to verify both creds are present and free of typos. `login.ts` only sees what's on disk, so anything stale in your head is ignored.
-3. Run `bun run login`. On success it rewrites `BP_TOKEN` and `BP_SESSION` in `./.env`.
-4. Call any MCP tool. The MCP server hot-reloads `./.env` on every tool call (`mcp.ts:25-43`, proxy around `BpStrategistsClient`), so the new tokens take effect immediately. **No `/mcp` reconnect needed.**
-
-How to verify after `bun run login`:
-
-- Grep `./.env` to confirm `BP_TOKEN` actually changed.
-- Call an MCP tool (e.g. `list_campaigns`). If it returns 200, the new token is live.
-
-When you **do** still need to reset the MCP server:
-
-- You changed code in `mcp.ts`, `client.ts`, `env.ts`, or any module they import. Hot-reload only covers env values, not code.
-- The MCP process died or was killed (`ps -ef | grep "bun.*mcp.ts"` to check).
-- Reset = `/mcp` in Claude Code → reconnect `bpstrategists`, or in any other host kill and let it respawn.
-
-### Path B — paste session cookie from browser
-
-Use when you can't / don't want to type credentials (SSO, 2FA, Cloudflare flaking the login flow, or just already-logged-in in a tab). You paste the session cookie; the CLI scrapes the CSRF token and writes both to `./.env` in one shot.
-
-1. **Grab the session cookie.** Browser DevTools → Application → Cookies → `bpstrategists.agencydashboard.io` → copy the value of `agency_dashboard_session`. That one cookie is the entire auth — `XSRF-TOKEN`, analytics cookies, and Google cookies are irrelevant.
-2. **Run the CLI.** From the repo root:
-   ```bash
-   bun run login:cookie '<paste cookie value here>'
-   ```
-   Accepts either the bare value or the full `agency_dashboard_session=<value>` pair. Also reads from stdin if no arg is passed. Writes / overwrites `BP_SESSION` and `BP_TOKEN` in `./.env`.
-3. **Verify.** Call any MCP tool. The MCP server hot-reloads `./.env`; no reconnect needed.
-
-Why this works: `BP_SESSION` (cookie) authenticates the user; `BP_TOKEN` (CSRF) only matters for POST/PUT/DELETE. The cookie and the scraped token end up bound to the same Laravel session, so both reads and writes work.
-
-Caveats:
-- The cookie expires ~24h after the browser issued it. When calls 401, repeat step 1-3 (or fall back to Path A).
-- If the curl in step 3 returns nothing, your cookie is probably dead — the server 302'd you to login.
-
-### Rules (apply to both paths)
-
-- Never pass credentials to `login.ts` via shell env, flags, or stdin. Always go through `./.env`.
-- `./.env` is gitignored. Never commit it. Never paste real cookies into docs.
-- A successful login is good for ~24h. Re-run when calls start 401-ing.
-- Scripts and tests under `scripts/` and `tests/` import `../env.ts`, which loads `./.env` and overrides `process.env`. They pick up the new tokens on next run automatically — same contract as the MCP proxy.
+When a tool returns 401 / "Not authenticated":
+1. If `BP_EMAIL` + `BP_PASSWORD` are already in `.env`, suggest the user run `bun run login` in the terminal.
+2. If not, walk them through the cookie-paste flow and call `set_auth` with the value they paste.
 
 ## Don't
 
-- Don't write a parallel login flow. If `bun run login` fails, fix `login.ts` rather than working around it.
-- Don't read auth from `~/.zshrc`, `~/.env`, or any other location. Repo-local `./.env` only.
+- Don't ask the user to edit `.env` by hand. `bun run setup`, `bun run login`, `bun run login:cookie`, and `set_auth` are the only sanctioned writers.
+- Don't create a parallel auth flow. If any auth path errors, surface the error verbatim.
+- Don't read auth from `~/.zshrc` or any other env source. Repo-local `./.env` only.
+- Don't restart the MCP after auth changes. The proxy in `mcp.ts` hot-reloads `./.env` on every call.
+- **Don't write one-off scripts (curl, bun, python, anything) to hit the BP dashboard directly.** Every dashboard call must go through the `bpstrategists` MCP tools. Reasons: (1) the MCP enforces the configured auth flow; if the MCP isn't loaded, you'll catch that before issuing a half-authed request; (2) the MCP is the single place CSRF + cookie + endpoint logic lives, so client behaviour stays consistent; (3) ad-hoc scripts skip the `set_auth` / re-login prompt path and leave the user with broken state. If a needed action isn't exposed, add a tool to `mcp.ts` rather than scripting around it.
+
+## Refreshing the install
+
+If the user moves the repo, run `bun run install:mcp` to re-register the MCP at user scope with the new absolute path. (Or just re-run `bun install`, which is idempotent for both MCP install and auth.)

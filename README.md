@@ -1,155 +1,70 @@
 # bpstrategists-client
 
-Lets you (or an AI assistant like Claude) control the BP Strategists agency dashboard with plain English instead of clicking through the web UI.
-
-You ask things like *"create a new campaign for acme.com with GA4 and GMB attached"* or *"schedule a GMB post for tomorrow at 5pm"*, and it happens.
+Lets Claude drive the BP Strategists agency dashboard in plain English. Create campaigns, schedule GMB posts, list integrations, archive stuff. Same things you'd do clicking around the dashboard, just by chatting.
 
 ---
 
-## What you can ask it to do
+## Setup (one-time, ~30 seconds)
 
-- **Campaigns** — create new tracking campaigns, list active or archived ones, archive old ones, look up which integrations a campaign has attached.
-- **Google connections** — list every Google account connected to the workspace and what each one is connected to (GA4 / Search Console / Ads / Google Business Profile).
-- **Integrations** — find the right GA4 account, Search Console property, Google Ads account, or GMB location to attach to a new campaign.
-- **GMB posting** — write a Google Business Profile post (now or scheduled for the future), upload images, set a call-to-action button, see what's already scheduled.
-- **Domain check** — confirm a domain is reachable before creating a campaign for it.
-
-You don't need to know any of the technical details below; you just talk to the AI and it handles the dashboard.
-
----
-
-## One-time setup
-
-You need [Bun](https://bun.sh) installed (`curl -fsSL https://bun.sh/install | bash`), then:
+You need [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`) and [Claude Code](https://claude.com/claude-code).
 
 ```
+git clone <this-repo>
+cd bpstrategists-client
 bun install
 ```
 
-Create a file called `.env` in the project folder with your dashboard login:
+That's it. `bun install` runs an interactive setup that asks how you want to authenticate:
 
-```
-BP_EMAIL=you@example.com
-BP_PASSWORD=yourpassword
-```
+1. **Email + password** — mints fresh tokens via the agency dashboard's login endpoint.
+2. **Paste session cookie** — paste the `agency_dashboard_session` cookie value from your browser. Use this if SSO / 2FA / Cloudflare blocks the password flow.
+3. **Skip** — set up later with `bun run login` or `bun run login:cookie`.
 
-Then log in:
+It then writes tokens to `./.env` (gitignored) and registers the MCP server at user scope. The MCP loads in every Claude Code session on this machine, in any folder. Restart Claude Code once if it was already open.
 
-```
-bun run login
-```
-
-That's it. The login command grabs the cookies it needs and saves them into the same `.env` file. You're now ready to use the tool.
+Re-running `bun install` later is a no-op for auth (existing tokens are preserved).
 
 ---
 
 ## Daily use
 
-### Wire it into your MCP host
+Open Claude Code anywhere and ask:
 
-You only do this once. The exact command depends on the host:
+> create a campaign for acme.com with the keywords "acme widgets", "buy acme" and the GMB location attached
 
-**Claude Code (CLI):**
+> schedule a GMB post for tomorrow at 5pm on the simonbalfe.com campaign
 
-```
-claude mcp add --transport stdio bpstrategists -- bun run /absolute/path/to/bpstrategists-client/mcp.ts
-```
+> list active campaigns
 
-That writes the server to the **local** scope (current project, private, stored in `~/.claude.json`). Override with `--scope project|user|local`:
-
-- `local` (default) — current project, private to you.
-- `project` — writes a `.mcp.json` at the repo root, shared with the team via git. First use triggers a one-time trust dialog. Reset with `claude mcp reset-project-choices`.
-- `user` — available across all your projects, private to you.
-
-To share with the team, commit a `.mcp.json` at the repo root:
-
-```json
-{
-  "mcpServers": {
-    "bpstrategists": {
-      "type": "stdio",
-      "command": "bun",
-      "args": ["run", "/absolute/path/to/bpstrategists-client/mcp.ts"]
-    }
-  }
-}
-```
-
-`CLAUDE_PROJECT_DIR` is auto-injected into the server's env, so a relative path works too if teammates clone to a consistent location. Reference: https://code.claude.com/docs/en/mcp.md.
-
-**Claude Desktop** — open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add:
-
-```json
-{
-  "mcpServers": {
-    "bpstrategists": {
-      "command": "bun",
-      "args": ["run", "/absolute/path/to/bpstrategists-client/mcp.ts"]
-    }
-  }
-}
-```
-
-**Cursor** — open the project's `.cursor/mcp.json` (or the global `~/.cursor/mcp.json`) and add the same `mcpServers` block as above.
-
-Replace `/absolute/path/to/bpstrategists-client` with wherever you cloned the repo. `bun` must be on the host's `PATH` (`which bun` to confirm). No env vars need to be passed in the config — the server reads `./.env` from the repo it's running out of.
-
-Restart the host (or `/mcp` reconnect in Claude Code) once after adding the entry. From then on it auto-starts whenever the host starts.
-
-### When something stops working
-
-If you get errors saying you're not logged in (typically once every 24 hours):
-
-```
-bun run login
-```
-
-That's all — it grabs fresh cookies and writes them to `./.env`. The MCP server hot-reloads `./.env` on every tool call, so the next AI request just works. No reconnect needed.
+Tokens last roughly 24 hours. When tool calls 401, run `bun run login` again (no args, reads creds from `.env`) and you're back.
 
 ---
 
-## Example things to say
+## What it can do
 
-- *"Show me every active campaign."*
-- *"Create a campaign for acme.com with these keywords: ..., tracking from the UK, with our Google Ads and GMB attached."*
-- *"Which campaigns is the simon@simonbalfe.com GMB account on?"*
-- *"Schedule this image as a GMB post for next Tuesday at 9am with a 'Learn more' button linking to acme.com."*
-- *"Archive the test campaigns I made yesterday."*
-- *"Which Google accounts are connected, and what does each one have access to?"*
-
----
-
-## Troubleshooting
-
-| Symptom | What to do |
-|---|---|
-| AI says "missing BP_TOKEN" or login errors | Run `bun run login` to refresh the cookies. |
-| AI says "missing BP_EMAIL or BP_PASSWORD" | Add them to `.env` (see "One-time setup" above). |
-| Campaign created but missing one integration | The Google Ads handshake is broken on the dashboard server — the integration is actually attached, just check the dashboard to confirm. |
-| AI says it can't reach the dashboard | Check your internet connection and that the dashboard is up at https://bpstrategists.agencydashboard.io. |
+- **Campaigns** — create, list active/archived, archive, look up integration bindings.
+- **Google connections** — list every Google account connected, see what each is connected to (GA4 / Search Console / Ads / GMB).
+- **Integrations** — find the right GA4 account, GSC property, Ads account, GMB location to attach.
+- **GMB posting** — write a post (now or scheduled), upload images, set a CTA, see what's already scheduled.
+- **Domain check** — verify a domain resolves before creating a campaign for it.
 
 ---
 
-## For developers
-
-- [docs/tools.md](./docs/tools.md) — full MCP tool reference (every input, every output).
-- [docs/auth.md](./docs/auth.md) — how the autologin works, what's persisted in `.env`, session expiry.
-- [docs/quirks.md](./docs/quirks.md) — dashboard quirks the client handles transparently.
-
-### Scripts
+## Scripts
 
 | Script | Purpose |
 |---|---|
-| `bun run login` | Refresh session cookies from email + password. |
-| `bun run scripts/example.ts` | Minimal usage example. |
-| `bun run scripts/list-bp.ts` | List active campaigns. |
-| `bun run scripts/list-gmb.ts` | List every GMB channel reachable across active campaigns. |
+| `bun run setup` | Interactive: pick auth method, mint tokens, register MCP. Runs automatically on `bun install`. |
+| `bun run login [email] [password]` | Mint tokens from credentials only. Args optional if `BP_EMAIL`/`BP_PASSWORD` already in `.env`. |
+| `bun run login:cookie '<cookie>'` | Mint tokens from a pasted `agency_dashboard_session` cookie. |
+| `bun run install:mcp` | Re-register the MCP at user scope without touching auth. |
+| `bun run reset` | Wipe all state: removes the global MCP entry and truncates `./.env`. Re-run `bun install` to re-set up. |
+| `bun run mcp` | Run the MCP server in the foreground (Claude Code normally launches this for you). |
 
-### Tests
+---
 
-Two end-to-end smoke tests covering the main flows:
+## How auth works
 
-| Test | Purpose |
-|---|---|
-| `bun run tests/create-campaign.ts` | Create a campaign with all 4 integrations attached and verify the bindings. |
-| `bun run tests/schedule-gmb-post.ts` | Schedule a GMB post and verify it appears in the calendar. |
+`./.env` holds `BP_EMAIL`, `BP_PASSWORD`, `BP_CSRF_TOKEN`, `BP_AGENCY_SESSION`. The MCP server hot-reloads `./.env` on every tool call, so token refreshes take effect with no restart.
+
+There's also a `set_auth` MCP tool that lets Claude refresh tokens directly from a pasted cookie value, without dropping out to the shell.
