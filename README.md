@@ -45,15 +45,34 @@ That's it. The login command grabs the cookies it needs and saves them into the 
 
 ## Daily use
 
-### Start the AI bridge
+### Wire it into your MCP host
+
+You only do this once. The exact command depends on the host:
+
+**Claude Code (CLI):**
 
 ```
-bun run mcp.ts
+claude mcp add bpstrategists bun run /absolute/path/to/bpstrategists-client/mcp.ts
 ```
 
-This starts the server that the AI talks to. Leave it running.
+**Claude Desktop** — open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add:
 
-If you're using Claude Code, you'll wire it in once and Claude will pick it up automatically each time.
+```json
+{
+  "mcpServers": {
+    "bpstrategists": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/bpstrategists-client/mcp.ts"]
+    }
+  }
+}
+```
+
+**Cursor** — open the project's `.cursor/mcp.json` (or the global `~/.cursor/mcp.json`) and add the same `mcpServers` block as above.
+
+Replace `/absolute/path/to/bpstrategists-client` with wherever you cloned the repo. `bun` must be on the host's `PATH` (`which bun` to confirm). No env vars need to be passed in the config — the server reads `./.env` from the repo it's running out of.
+
+Restart the host (or `/mcp` reconnect in Claude Code) once after adding the entry. From then on it auto-starts whenever the host starts.
 
 ### When something stops working
 
@@ -63,7 +82,7 @@ If you get errors saying you're not logged in (typically once every 24 hours):
 bun run login
 ```
 
-That's all — it grabs fresh cookies. Then ask the AI to retry whatever you were doing. If the AI was in the middle of a task, it may need to be reconnected (in Claude Code, type `/mcp` and choose reconnect).
+That's all — it grabs fresh cookies and writes them to `./.env`. The MCP server hot-reloads `./.env` on every tool call, so the next AI request just works. No reconnect needed.
 
 ---
 
