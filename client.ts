@@ -272,11 +272,11 @@ export type ClientConfig = {
 export type GmbCtaAction =
   | 'none'
   | 'book'
-  | 'order'
-  | 'shop'
-  | 'learn_more'
-  | 'sign_up'
-  | 'call';
+  | 'orderonline'
+  | 'buy'
+  | 'learnmore'
+  | 'signup'
+  | 'callnow';
 
 export type GmbSectionType = 'whatsnew' | 'event' | 'offer';
 
@@ -308,7 +308,7 @@ export type ScheduleGmbPostInput = {
   sectionType?: GmbSectionType;
   cta?: {
     action: GmbCtaAction;
-    /** URL for actions that need a link (learn_more, book, order, shop, sign_up). */
+    /** URL for actions that need a link (book, orderonline, buy, learnmore, signup). callnow uses the location's phone number, none has no URL. */
     url?: string;
   };
 };
@@ -1043,6 +1043,12 @@ export class BpStrategistsClient {
     return this.postJson('/removeDirectoryAndFiles', body);
   }
 
+  /** Delete a scheduled or published social post. `row` is the encrypted per-post token from `getCalendarPosts`. */
+  async deleteSocialPost(row: string): Promise<{ status: boolean; message: string }> {
+    const body = new URLSearchParams({ row, _token: this.token });
+    return this.postJson('/delete-social-post', body);
+  }
+
   async getCalendarPosts(opts: {
     /** Encrypted Laravel campaignId (form field). */
     campaignId: string;
@@ -1161,7 +1167,7 @@ export class BpStrategistsClient {
       body: form,
     });
     this.absorbSetCookie(res);
-    this.assertOk(res, path);
+    await this.assertOk(res, path);
     return res;
   }
 
@@ -1216,7 +1222,7 @@ export class BpStrategistsClient {
       headers: this.baseHeaders('GET'),
     });
     this.absorbSetCookie(res);
-    this.assertOk(res, path);
+    await this.assertOk(res, path);
     return res;
   }
 
@@ -1235,7 +1241,7 @@ export class BpStrategistsClient {
       body: body.toString(),
     });
     this.absorbSetCookie(res);
-    this.assertOk(res, path);
+    await this.assertOk(res, path);
     return res;
   }
 
@@ -1266,14 +1272,15 @@ export class BpStrategistsClient {
     return h;
   }
 
-  private assertOk(res: Response, path: string): void {
+  private async assertOk(res: Response, path: string): Promise<void> {
     if (res.status >= 300 && res.status < 400) {
       throw new Error(
         `${path} → ${res.status} redirect to ${res.headers.get('location')}. Session cookie likely expired.`,
       );
     }
     if (!res.ok) {
-      throw new Error(`${path} → HTTP ${res.status}`);
+      const body = await res.text().catch(() => '');
+      throw new Error(`${path} → HTTP ${res.status}${body ? `\n${body}` : ''}`);
     }
   }
 

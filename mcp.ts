@@ -45,7 +45,7 @@ const client = new Proxy({} as BpStrategistsClient, {
 
 const server = new McpServer({
   name: 'bpstrategists',
-  version: '0.3.0',
+  version: '0.4.0',
 });
 
 server.tool(
@@ -228,21 +228,6 @@ server.tool(
 );
 
 server.tool(
-  'list_connected_emails',
-  [
-    'List the OAuth-connected Google accounts as the new-campaign wizard sees them, split by provider:',
-    'ga4, searchConsole, ads, gmb. Each entry is { id, label } where label is the gmail address.',
-    'Use the gmail address as input to list_search_console_properties / list_ads_accounts / list_gmb_locations / list_ga4_accounts.',
-    'No campaign id needed — pure OAuth-side discovery.',
-  ].join(' '),
-  {},
-  async () => {
-    const res = await client.listWizardEmails();
-    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
-  },
-);
-
-server.tool(
   'list_search_console_properties',
   'List Google Search Console properties available under a given OAuth account. Pass the Gmail address from list_connected_emails.searchConsole.',
   {
@@ -403,8 +388,13 @@ server.tool(
     sectionType: z.enum(['whatsnew', 'event', 'offer']).default('whatsnew'),
     cta: z
       .object({
-        action: z.enum(['none', 'book', 'order', 'shop', 'learn_more', 'sign_up', 'call']),
-        url: z.string().optional().describe('Required for actions that need a link.'),
+        action: z.enum(['none', 'book', 'orderonline', 'buy', 'learnmore', 'signup', 'callnow']),
+        url: z
+          .string()
+          .optional()
+          .describe(
+            'Destination URL. Required for book, orderonline, buy, learnmore, signup. Omit for callnow (Google uses the GMB profile\'s phone number) and none.',
+          ),
       })
       .optional(),
   },
@@ -458,6 +448,21 @@ server.tool(
       channelId,
     });
     return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
+  'delete_gmb_post',
+  [
+    'Delete a scheduled or published social post.',
+    'Pass the encrypted `row` value returned by list_gmb_posts for the target post.',
+  ].join(' '),
+  {
+    row: z.string().min(1).describe('Encrypted per-post token from list_gmb_posts (`row` field).'),
+  },
+  async ({ row }) => {
+    const result = await client.deleteSocialPost(row);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   },
 );
 
