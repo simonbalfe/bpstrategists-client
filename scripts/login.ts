@@ -1,11 +1,9 @@
 #!/usr/bin/env bun
 import { writeEnvVars } from '../env.ts';
-import { Impit } from 'impit';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const LANDING = 'https://agencydashboard.io';
-const SUBDOMAIN = 'https://bpstrategists.agencydashboard.io';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
@@ -17,7 +15,6 @@ if (!email || !password) {
   process.exit(1);
 }
 
-const http = new Impit({ browser: 'chrome' });
 const jar = new Map<string, { value: string; domain: string }>();
 
 console.log(`[1/6] GET ${LANDING}/`);
@@ -76,7 +73,7 @@ if (loginJson.status === false || loginJson.success === false || loginJson.error
 const bridgeUrl = extractBridgeUrl(loginJson, loginText);
 if (!bridgeUrl) {
   die(
-    `Could not find SSO bridge URL in login response. Looked under: url, redirect, redirect_url, redirectUrl, location, data.url, data.redirect.\n` +
+    `Could not find SSO bridge URL in login response. Looked under: url, redirect, redirect_url, redirectUrl, location, data.url, data.redirect, message.\n` +
       `Full body:\n${loginText}`,
   );
 }
@@ -164,9 +161,9 @@ async function fetchWithJar(url: string, init: RequestInit): Promise<Response> {
   const cookieHeader = buildCookieHeader(url);
   const headers = new Headers(init.headers);
   if (cookieHeader) headers.set('Cookie', cookieHeader);
-  const res = await http.fetch(url, { ...init, headers } as unknown as Parameters<typeof http.fetch>[1]);
-  absorbSetCookie(res as unknown as Response, url);
-  return res as unknown as Response;
+  const res = await fetch(url, { ...init, headers });
+  absorbSetCookie(res, url);
+  return res;
 }
 
 function buildCookieHeader(url: string): string {
@@ -218,6 +215,7 @@ function extractBridgeUrl(json: Record<string, unknown>, raw: string): string | 
     json.location,
     (json.data as Record<string, unknown> | undefined)?.url,
     (json.data as Record<string, unknown> | undefined)?.redirect,
+    json.message,
   ];
   for (const c of candidates) {
     if (typeof c === 'string' && /bpstrategists\.agencydashboard\.io\/dashboard\//.test(c)) return c;
@@ -226,4 +224,3 @@ function extractBridgeUrl(json: Record<string, unknown>, raw: string): string | 
   if (m) return m[0].replace(/\\\//g, '/');
   return null;
 }
-
