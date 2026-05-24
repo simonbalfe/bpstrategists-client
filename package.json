@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bun run scripts/example.ts",
     "mcp": "bun run mcp.ts",
-    "login": "bun run scripts/login.ts"
+    "login": "bun run scripts/login.ts",
+    "login:cookie": "bun run scripts/login-cookie.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

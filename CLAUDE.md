@@ -73,22 +73,15 @@ When you **do** still need to reset the MCP server:
 
 ### Path B — paste session cookie from browser
 
-Use when you can't / don't want to type credentials (SSO, 2FA, Cloudflare flaking the login flow, or just already-logged-in in a tab). You paste the session cookie; a one-liner derives the CSRF token from it.
+Use when you can't / don't want to type credentials (SSO, 2FA, Cloudflare flaking the login flow, or just already-logged-in in a tab). You paste the session cookie; the CLI scrapes the CSRF token and writes both to `./.env` in one shot.
 
 1. **Grab the session cookie.** Browser DevTools → Application → Cookies → `bpstrategists.agencydashboard.io` → copy the value of `agency_dashboard_session`. That one cookie is the entire auth — `XSRF-TOKEN`, analytics cookies, and Google cookies are irrelevant.
-2. **Paste into `./.env`:**
-   ```
-   BP_SESSION="agency_dashboard_session=<paste here>"
-   BP_TOKEN=
-   ```
-3. **Derive the CSRF token.** GET the dashboard with that cookie, scrape `<meta name="csrf-token">`, paste into `BP_TOKEN`. One-liner (run from repo root):
+2. **Run the CLI.** From the repo root:
    ```bash
-   curl -s -H "Cookie: $(grep -E '^BP_SESSION=' .env | cut -d= -f2- | tr -d '"')" \
-     https://bpstrategists.agencydashboard.io/dashboard \
-     | grep -oE 'name="csrf-token" content="[^"]+"' | cut -d'"' -f4
+   bun run login:cookie '<paste cookie value here>'
    ```
-   Copy the printed value into `BP_TOKEN=` in `./.env`.
-4. **Verify.** Call any MCP tool. The MCP server hot-reloads `./.env`; no reconnect needed.
+   Accepts either the bare value or the full `agency_dashboard_session=<value>` pair. Also reads from stdin if no arg is passed. Writes / overwrites `BP_SESSION` and `BP_TOKEN` in `./.env`.
+3. **Verify.** Call any MCP tool. The MCP server hot-reloads `./.env`; no reconnect needed.
 
 Why this works: `BP_SESSION` (cookie) authenticates the user; `BP_TOKEN` (CSRF) only matters for POST/PUT/DELETE. The cookie and the scraped token end up bound to the same Laravel session, so both reads and writes work.
 
