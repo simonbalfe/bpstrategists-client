@@ -52,8 +52,30 @@ You only do this once. The exact command depends on the host:
 **Claude Code (CLI):**
 
 ```
-claude mcp add bpstrategists bun run /absolute/path/to/bpstrategists-client/mcp.ts
+claude mcp add --transport stdio bpstrategists -- bun run /absolute/path/to/bpstrategists-client/mcp.ts
 ```
+
+That writes the server to the **local** scope (current project, private, stored in `~/.claude.json`). Override with `--scope project|user|local`:
+
+- `local` (default) — current project, private to you.
+- `project` — writes a `.mcp.json` at the repo root, shared with the team via git. First use triggers a one-time trust dialog. Reset with `claude mcp reset-project-choices`.
+- `user` — available across all your projects, private to you.
+
+To share with the team, commit a `.mcp.json` at the repo root:
+
+```json
+{
+  "mcpServers": {
+    "bpstrategists": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/bpstrategists-client/mcp.ts"]
+    }
+  }
+}
+```
+
+`CLAUDE_PROJECT_DIR` is auto-injected into the server's env, so a relative path works too if teammates clone to a consistent location. Reference: https://code.claude.com/docs/en/mcp.md.
 
 **Claude Desktop** — open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add:
 
