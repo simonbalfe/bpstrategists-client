@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { setAuthFromCookie } from '../auth.ts';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 
 const raw = (process.argv[2] ?? (await readStdin())).trim();
 if (!raw) {
@@ -16,6 +18,9 @@ try {
   console.error((err as Error).message);
   process.exit(1);
 }
+
+const mcpResult = spawnSync('bun', ['run', join(import.meta.dir, 'install-mcp.ts')], { stdio: 'inherit' });
+if (mcpResult.status !== 0) process.exit(mcpResult.status ?? 1);
 
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return '';

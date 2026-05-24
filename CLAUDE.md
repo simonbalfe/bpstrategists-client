@@ -8,9 +8,9 @@ MCP server that drives the BP Strategists agency dashboard. `bun install` does t
 
 ## Auth
 
-Two paths, both write `BP_CSRF_TOKEN` + `BP_AGENCY_SESSION` to `./.env`. Tokens last ~24h.
+Two paths, both write `BP_CSRF_TOKEN` + `BP_AGENCY_SESSION` to `./.env` AND register the MCP at user scope on success (idempotent — safe to re-run). Tokens last ~24h.
 
-- **Credential login** (primary): `bun run login` reads `BP_EMAIL`+`BP_PASSWORD` from `./.env` and mints fresh tokens via the dashboard's `/ajax-do-login` endpoint. First-time use during `bun install` prompts interactively.
+- **Credential login** (primary): `bun run login` reads `BP_EMAIL`+`BP_PASSWORD` from `./.env` (or accepts them as args) and mints fresh tokens via the dashboard's `/ajax-do-login` endpoint. First-time use during `bun install` prompts interactively.
 - **Cookie paste** (fallback): `bun run login:cookie '<value>'` or the `set_auth` MCP tool accepts the `agency_dashboard_session` cookie value from the user's browser. Use this when credential login is blocked (SSO, 2FA, Cloudflare). Steps: open https://bpstrategists.agencydashboard.io in the user's browser → DevTools → Application → Cookies → copy `agency_dashboard_session` value.
 
 When a tool returns 401 / "Not authenticated":

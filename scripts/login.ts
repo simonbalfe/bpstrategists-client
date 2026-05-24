@@ -2,6 +2,7 @@
 import { writeEnvVars } from '../env.ts';
 import { Impit } from 'impit';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const LANDING = 'https://agencydashboard.io';
 const SUBDOMAIN = 'https://bpstrategists.agencydashboard.io';
@@ -31,10 +32,10 @@ const landing = await fetchWithJar(`${LANDING}/`, {
     'Sec-Fetch-Site': 'none',
   },
 });
-if (!landing.ok) die(`GET ${LANDING}/ returned HTTP ${landing.status}. Body preview:\n${(await landing.text()).slice(0, 400)}`);
+if (!landing.ok) die(`GET ${LANDING}/ returned HTTP ${landing.status}. Body:\n${await landing.text()}`);
 const landingHtml = await landing.text();
 const csrfMeta = landingHtml.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/i);
-if (!csrfMeta) die(`No <meta name="csrf-token"> on ${LANDING}/. First 500 chars of body:\n${landingHtml.slice(0, 500)}`);
+if (!csrfMeta) die(`No <meta name="csrf-token"> on ${LANDING}/. Body (${landingHtml.length} bytes):\n${landingHtml}`);
 const loginToken = csrfMeta[1];
 console.log(`      csrf meta = ${loginToken.slice(0, 16)}...`);
 console.log(`      cookies   = ${cookieNames() || '(none)'}`);
@@ -58,13 +59,13 @@ const loginRes = await fetchWithJar(`${LANDING}/ajax-do-login`, {
   body: loginBody.toString(),
 });
 const loginText = await loginRes.text();
-if (!loginRes.ok) die(`POST /ajax-do-login returned HTTP ${loginRes.status}. Body:\n${loginText.slice(0, 600)}`);
+if (!loginRes.ok) die(`POST /ajax-do-login returned HTTP ${loginRes.status}. Body (${loginText.length} bytes):\n${loginText}`);
 
 let loginJson: Record<string, unknown>;
 try {
   loginJson = JSON.parse(loginText);
 } catch {
-  die(`/ajax-do-login did not return JSON. Body:\n${loginText.slice(0, 600)}`);
+  die(`/ajax-do-login did not return JSON. Body (${loginText.length} bytes):\n${loginText}`);
 }
 console.log(`      response keys = ${Object.keys(loginJson).join(', ') || '(none)'}`);
 
@@ -106,7 +107,7 @@ for (let hop = 0; hop < 5; hop++) {
     currentUrl = new URL(next, currentUrl).toString();
     continue;
   }
-  if (!res.ok) die(`Bridge GET failed: HTTP ${res.status} at ${currentUrl}\nBody:\n${(await res.text()).slice(0, 400)}`);
+  if (!res.ok) die(`Bridge GET failed: HTTP ${res.status} at ${currentUrl}\nBody:\n${await res.text()}`);
   dashHtml = await res.text();
   break;
 }
@@ -115,7 +116,7 @@ console.log(`      cookies = ${cookieNames()}`);
 
 console.log(`[4/6] Scrape CSRF from /dashboard`);
 const dashCsrf = dashHtml.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/i);
-if (!dashCsrf) die(`No <meta name="csrf-token"> on /dashboard. First 500 chars:\n${dashHtml.slice(0, 500)}`);
+if (!dashCsrf) die(`No <meta name="csrf-token"> on /dashboard. Body (${dashHtml.length} bytes):\n${dashHtml}`);
 const finalToken = dashCsrf[1];
 console.log(`      csrf = ${finalToken.slice(0, 16)}...`);
 
@@ -142,6 +143,9 @@ writeEnvVars(envPath, {
 console.log(`      wrote ${envPath}`);
 
 console.log(`\nLogin OK. Tokens persisted to ${envPath}.`);
+
+const mcpResult = spawnSync('bun', ['run', join(import.meta.dir, 'install-mcp.ts')], { stdio: 'inherit' });
+if (mcpResult.status !== 0) process.exit(mcpResult.status ?? 1);
 
 function die(msg: string): never {
   console.error(`\nFAILED: ${msg}`);
