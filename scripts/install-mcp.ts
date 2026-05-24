@@ -32,7 +32,9 @@ if (!which('bun')) {
   process.exit(0);
 }
 
-spawnSync('claude', ['mcp', 'remove', '--scope', 'user', NAME], { stdio: 'ignore' });
+for (const scope of ['local', 'project', 'user']) {
+  spawnSync('claude', ['mcp', 'remove', '--scope', scope, NAME], { stdio: 'ignore' });
+}
 
 const add = spawnSync(
   'claude',

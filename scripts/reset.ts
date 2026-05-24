@@ -8,13 +8,11 @@ const NAME = 'bpstrategists';
 const REPO_ROOT = join(import.meta.dir, '..');
 const ENV_PATH = join(REPO_ROOT, '.env');
 
-console.log(`[1/2] Removing ${NAME} MCP from user scope`);
+console.log(`[1/2] Removing ${NAME} MCP from all scopes`);
 if (which('claude')) {
-  const res = spawnSync('claude', ['mcp', 'remove', '--scope', 'user', NAME], { encoding: 'utf8' });
-  if (res.status === 0) {
-    console.log(`      removed`);
-  } else {
-    console.log(`      not registered (skipping)`);
+  for (const scope of ['local', 'project', 'user']) {
+    const res = spawnSync('claude', ['mcp', 'remove', '--scope', scope, NAME], { encoding: 'utf8' });
+    console.log(`      ${scope}: ${res.status === 0 ? 'removed' : 'not registered'}`);
   }
 } else {
   console.log(`      \`claude\` CLI not on PATH (skipping)`);
