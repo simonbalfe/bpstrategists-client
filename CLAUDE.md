@@ -25,6 +25,13 @@ When a tool returns 401 / "Not authenticated":
 - Don't restart the MCP after auth changes. The proxy in `mcp.ts` hot-reloads `./.env` on every call.
 - **Don't write one-off scripts (curl, bun, python, anything) to hit the BP dashboard directly.** Every dashboard call must go through the `bpstrategists` MCP tools. Reasons: (1) the MCP enforces the configured auth flow; if the MCP isn't loaded, you'll catch that before issuing a half-authed request; (2) the MCP is the single place CSRF + cookie + endpoint logic lives, so client behaviour stays consistent; (3) ad-hoc scripts skip the `set_auth` / re-login prompt path and leave the user with broken state. If a needed action isn't exposed, add a tool to `mcp.ts` rather than scripting around it.
 
-## Refreshing the install
+## Scripts
 
-If the user moves the repo, run `bun run install:mcp` to re-register the MCP at user scope with the new absolute path. (Or just re-run `bun install`, which is idempotent for both MCP install and auth.)
+All available via `bun run <name>`:
+
+- `setup` — interactive first-time setup: pick auth method, mint tokens, register MCP. Runs automatically as `postinstall` on `bun install`.
+- `login [email] [password]` — credential login. Args optional if `BP_EMAIL`/`BP_PASSWORD` already in `.env`.
+- `login:cookie '<value>'` — paste an `agency_dashboard_session` cookie value from the browser. Fallback when credential login is blocked.
+- `install:mcp` — re-register the MCP at user scope without touching auth. Use after moving the repo.
+- `reset` — wipe all state: removes the MCP entry from user scope and truncates `./.env`. Re-run `bun install` to set up again.
+- `mcp` — run the MCP server in foreground (Claude Code launches this automatically).
