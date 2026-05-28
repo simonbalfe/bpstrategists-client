@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { writeEnvVars } from '../env.ts';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -13,6 +14,20 @@ if (!email || !password) {
   console.error('Usage: bun run login <email> <password>');
   console.error('Or set BP_EMAIL and BP_PASSWORD in ./.env');
   process.exit(1);
+}
+
+// `mcp.ts` → `client.ts` requires `impit`. If node_modules is missing the MCP
+// will fail to start even after a successful login. Install with
+// --ignore-scripts so the interactive setup.ts postinstall doesn't prompt
+// (we're about to mint tokens + register the MCP ourselves).
+const REPO_ROOT = join(import.meta.dir, '..');
+if (!existsSync(join(REPO_ROOT, 'node_modules'))) {
+  console.log('[0/6] node_modules missing — running `bun install --ignore-scripts`');
+  const r = spawnSync('bun', ['install', '--ignore-scripts'], { cwd: REPO_ROOT, stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`\nFAILED: bun install exited with status ${r.status}`);
+    process.exit(r.status ?? 1);
+  }
 }
 
 const jar = new Map<string, { value: string; domain: string }>();

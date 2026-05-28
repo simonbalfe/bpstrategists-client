@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { setAuthFromCookie } from '../auth.ts';
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -8,6 +9,20 @@ if (!raw) {
   console.error('Missing cookie. Pass it as an argument or pipe it on stdin.');
   console.error('Get it from DevTools -> Application -> Cookies -> agency_dashboard_session');
   process.exit(1);
+}
+
+// `mcp.ts` → `client.ts` requires `impit`. If node_modules is missing the MCP
+// will fail to start even after a successful cookie set. Install with
+// --ignore-scripts so setup.ts's interactive prompt is bypassed (we'll register
+// the MCP ourselves below).
+const REPO_ROOT = join(import.meta.dir, '..');
+if (!existsSync(join(REPO_ROOT, 'node_modules'))) {
+  console.log('node_modules missing — running `bun install --ignore-scripts`');
+  const r = spawnSync('bun', ['install', '--ignore-scripts'], { cwd: REPO_ROOT, stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`\nFAILED: bun install exited with status ${r.status}`);
+    process.exit(r.status ?? 1);
+  }
 }
 
 try {
