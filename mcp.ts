@@ -466,4 +466,106 @@ server.tool(
   },
 );
 
+server.tool(
+  'search_keywords',
+  [
+    'Keyword research: seed a keyword and get related ideas with search volume, competition, CPC bid range, and a 12-month trend.',
+    'Backs the dashboard\'s "Search by keyword" panel in Keyword Explorer.',
+    'Use list_keyword_locations / list_keyword_languages to find ids. locationId 0 = Worldwide.',
+  ].join(' '),
+  {
+    query: z.string().min(1).describe('Seed keyword, e.g. "creator".'),
+    locationId: z
+      .number()
+      .int()
+      .optional()
+      .describe('DataForSEO location id from list_keyword_locations. Defaults to 0 (Worldwide). Common: 2840=US, 2826=UK, 2276=DE.'),
+    languageId: z
+      .number()
+      .int()
+      .optional()
+      .describe('DataForSEO language id from list_keyword_languages. Omit for "Any Language". 1000 = English.'),
+    campaignId: z
+      .number()
+      .int()
+      .optional()
+      .describe('Optional campaign id to scope the search. Usually omitted.'),
+  },
+  async ({ query, locationId, languageId, campaignId }) => {
+    const res = await client.searchKeywords({
+      query,
+      category: 'keyword',
+      locationId,
+      languageId,
+      campaignId,
+    });
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
+  'search_keywords_by_domain',
+  [
+    'Keyword research from a URL/domain: enter a competitor or your own site and get the keywords it ranks for.',
+    'Backs the dashboard\'s "Search by domain" panel in Keyword Explorer.',
+    'Returns the same shape as search_keywords. locationId 0 = Worldwide.',
+  ].join(' '),
+  {
+    domain: z.string().min(1).describe('Domain or full URL, e.g. "creatorcrawl.com" or "https://example.com/blog".'),
+    locationId: z
+      .number()
+      .int()
+      .optional()
+      .describe('DataForSEO location id from list_keyword_locations. Defaults to 0 (Worldwide). Common: 2840=US, 2826=UK.'),
+    languageId: z
+      .number()
+      .int()
+      .optional()
+      .describe('DataForSEO language id from list_keyword_languages. Omit for "Any Language". 1000 = English.'),
+    campaignId: z
+      .number()
+      .int()
+      .optional()
+      .describe('Optional campaign id to scope the search. Usually omitted.'),
+  },
+  async ({ domain, locationId, languageId, campaignId }) => {
+    const res = await client.searchKeywords({
+      query: domain,
+      category: 'domain',
+      locationId,
+      languageId,
+      campaignId,
+    });
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_keyword_locations',
+  [
+    'List DataForSEO locations supported by the keyword explorer. Pass the locationId to search_keywords / search_keywords_by_domain.',
+    'Distinct from campaign locations (which use city-level ids). Keyword explorer uses country-level ids: US=2840, UK=2826, DE=2276, ES=2724, FR=2250, Worldwide=0.',
+    'Pass an optional query to autocomplete (e.g. "germ" -> Germany).',
+  ].join(' '),
+  {
+    query: z.string().default('').describe('Optional substring to filter locations. Empty returns the default top-6 list.'),
+  },
+  async ({ query }) => {
+    const res = await client.listKeywordLocations(query);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
+server.tool(
+  'list_keyword_languages',
+  'List DataForSEO languages supported by the keyword explorer. Pass the languageId to search_keywords / search_keywords_by_domain. 1000 = English.',
+  {
+    query: z.string().default('').describe('Optional substring to filter languages. Empty returns the full list.'),
+  },
+  async ({ query }) => {
+    const res = await client.listKeywordLanguages(query);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  },
+);
+
 await server.connect(new StdioServerTransport());

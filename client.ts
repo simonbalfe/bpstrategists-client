@@ -2,6 +2,18 @@ import { Impit } from 'impit';
 import { resolveCountry } from './locations.ts';
 
 const BASE_URL = 'https://bpstrategists.agencydashboard.io';
+const SOCIAL_BASE_URL = 'https://social.agencydashboard.io';
+
+// Structural superset of DOM `Response` and impit's `ImpitResponse`. The
+// helpers below only ever touch this subset, so widening the signature
+// removes the structural mismatch between the two response classes.
+type HttpResponse = {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly headers: Headers;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+};
 
 export type UrlType = 'Root Domain' | 'Exact URL' | 'Subdomain' | 'Subfolder';
 export type RegionalDb = 'us' | 'uk' | string;
@@ -267,6 +279,74 @@ export type ClientConfig = {
   token: string;
   sessionCookie: string;
   baseUrl?: string;
+};
+
+export type KeywordExplorerLocation = {
+  /** DataForSEO numeric location id. Pass to keyword search as `locationId`. 0 = Worldwide. */
+  locationId: number;
+  /** Country/city display name, e.g. "United States", "United Kingdom". */
+  name: string;
+  /** "Country", "City", etc. */
+  type: string;
+};
+
+export type KeywordExplorerLanguage = {
+  /** DataForSEO numeric language id, e.g. 1000 = English. */
+  languageId: number;
+  /** Language display name, e.g. "English". */
+  name: string;
+};
+
+export type KeywordTrendPoint = {
+  year: number;
+  month: number;
+  monthlySearch: number;
+};
+
+export type KeywordCompetition = 'low' | 'medium' | 'high' | 'unknown';
+
+export type KeywordResult = {
+  keyword: string;
+  /** Bucket the dashboard groups the row under, e.g. "Keywords you provided" or "Keyword Ideas". */
+  section: string;
+  /** Average monthly search volume across the last 12 months. */
+  searchVolume: number;
+  /** DataForSEO competition tier (low/medium/high). */
+  competition: KeywordCompetition;
+  /** 0-100 numeric competition index. Higher = more competitive. */
+  competitionIndex: number;
+  /** Low CPC bid estimate in USD. */
+  bidLow: number;
+  /** High CPC bid estimate in USD. */
+  bidHigh: number;
+  /** DataForSEO location id this row was fetched for. */
+  locationId: number;
+  /** DataForSEO language id this row was fetched for. */
+  languageId: number;
+  /** Last ~12 monthly_search points. */
+  trend: KeywordTrendPoint[];
+};
+
+export type KeywordSearchInput = {
+  /** Either a seed keyword (category=keyword) or a URL/domain (category=domain). */
+  query: string;
+  /** "keyword" = find related ideas from a seed keyword; "domain" = mine keyword ideas from a URL. */
+  category: 'keyword' | 'domain';
+  /** DataForSEO location id from listKeywordLocations. 0 = Worldwide. Defaults to 0. */
+  locationId?: number;
+  /** DataForSEO language id from listKeywordLanguages. Empty = Any Language. Defaults to empty. */
+  languageId?: number;
+  /** Optional campaign id to scope the search. Rarely needed. */
+  campaignId?: number;
+};
+
+export type KeywordSearchResult = {
+  status: string;
+  query: string;
+  category: 'keyword' | 'domain';
+  locationId: number;
+  languageId: number | '';
+  results: KeywordResult[];
 };
 
 export type GmbCtaAction =
@@ -1154,9 +1234,155 @@ export class BpStrategistsClient {
     return uploaded.url;
   }
 
+  // -------- Keyword Explorer --------
+
+  // social.agencydashboard.io is a separate host that hosts the keyword
+  // research endpoint. It's CSRF-gated (no session cookie sent), so as long
+  // as we forward the same X-CSRF-TOKEN the dashboard uses, requests pass.
+  // The `user_id` query param is the dashboard user's numeric id — extracted
+  // once from /dashboard HTML and cached.
+  private userId: number | null = null;
+
+  async getUserId(): Promise<number> {
+    if (this.userId !== null) return this.userId;
+    const html = await this.getString('/dashboard');
+    // The Agency Dashboard layout always emits the authed user's numeric id as
+    // <input type="hidden" class="auth_id" value="<id>" />. The keyword
+    // explorer cross-origin call accepts either auth_id (the logged-in user)
+    // or the agency owner id baked into whitelabel asset paths — both return
+    // the same data. auth_id is the labeled, canonical source.
+    const patterns: RegExp[] = [
+      /class=["']auth_id["'][^>]*value=["'](\d+)["']/i,
+      /value=["'](\d+)["'][^>]*class=["']auth_id["']/i,
+      /\/whitelabel_[a-z_]+\/(\d+)\//i,
+    ];
+    for (const re of patterns) {
+      const m = html.match(re);
+      if (m) {
+        this.userId = Number(m[1]);
+        return this.userId;
+      }
+    }
+    const hasAuthIdToken = /auth_id/i.test(html);
+    const looksLikeLogin = /<form[^>]+login|name=["']email["']\s+type=["']email/i.test(html);
+    throw new Error(
+      'Could not extract user_id from /dashboard HTML. ' +
+        `htmlLen=${html.length} hasAuthIdToken=${hasAuthIdToken} looksLikeLogin=${looksLikeLogin}. ` +
+        'If looksLikeLogin=true the session expired (rerun `bun run login`). ' +
+        'You can also hardcode `BP_USER_ID=<id>` in .env as a workaround.',
+    );
+  }
+
+  async listKeywordLocations(query: string = ''): Promise<KeywordExplorerLocation[]> {
+    const qs = new URLSearchParams({ location: query, category: '', type: 'ideas' });
+    const raw = (await this.getJson(`/ajax_get_dfs_locations?${qs}`)) as { data?: string };
+    const html = raw?.data ?? '';
+    const out: KeywordExplorerLocation[] = [];
+    const seen = new Set<number>();
+    const liRe = /<li[^>]*class="[^"]*location-data[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+    for (const li of html.matchAll(liRe)) {
+      const block = li[1];
+      const idMatch = block.match(/location_id=["'](\d+)["']/i);
+      const nameMatch = block.match(/location-name=["']([^"']+)["']/i) ?? block.match(/<span class="text">(?:<[^>]+>)*\s*([^<]+?)\s*</);
+      const typeMatch = block.match(/location_type=["']([^"']+)["']/i) ?? block.match(/<small>([^<]+)<\/small>/i);
+      if (!idMatch) continue;
+      const locationId = Number(idMatch[1]);
+      if (seen.has(locationId)) continue;
+      seen.add(locationId);
+      out.push({
+        locationId,
+        name: (nameMatch?.[1] ?? '').trim() || 'Worldwide',
+        type: (typeMatch?.[1] ?? '').trim() || 'Default',
+      });
+    }
+    return out;
+  }
+
+  async listKeywordLanguages(query: string = ''): Promise<KeywordExplorerLanguage[]> {
+    const html = await this.getString(`/ajax_get_dfs_languages?language=${encodeURIComponent(query)}`);
+    const out: KeywordExplorerLanguage[] = [];
+    for (const m of html.matchAll(/<option[^>]*language_id=["'](\d+)["'][^>]*>([^<]+)<\/option>/gi)) {
+      const languageId = Number(m[1]);
+      if (!Number.isFinite(languageId) || languageId === 0) continue;
+      out.push({ languageId, name: m[2].trim() });
+    }
+    return out;
+  }
+
+  async searchKeywords(input: KeywordSearchInput): Promise<KeywordSearchResult> {
+    const userIdFromEnv = process.env.BP_USER_ID && Number(process.env.BP_USER_ID);
+    const userId =
+      typeof userIdFromEnv === 'number' && Number.isFinite(userIdFromEnv)
+        ? userIdFromEnv
+        : await this.getUserId();
+    const categoryFlag = input.category === 'domain' ? 2 : 1;
+    const locationId = input.locationId ?? 0;
+    const languageId = input.languageId ?? '';
+    const campaignId = input.campaignId ?? '';
+    const qs = new URLSearchParams({
+      search_query: input.query,
+      locations: locationId.toString(),
+      language: languageId === '' ? '' : languageId.toString(),
+      campaign_id: campaignId === '' ? '' : campaignId.toString(),
+      user_id: userId.toString(),
+      category: categoryFlag.toString(),
+    });
+    await this.ensurePrimed();
+    // Bun fetch (not Impit). The social host is a plain CORS API with no
+    // bot-detection — and Impit garbles the 1MB+ brotli payload the
+    // domain-category response returns. Bun's fetch handles decompression
+    // correctly.
+    const res = await fetch(`${SOCIAL_BASE_URL}/ajax_fetch_keyword_data?${qs}`, {
+      method: 'GET',
+      headers: this.socialHeaders(),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`/ajax_fetch_keyword_data → HTTP ${res.status}${body ? `\n${body.slice(0, 500)}` : ''}`);
+    }
+    const text = await res.text();
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error(`ajax_fetch_keyword_data: non-JSON response (first 200 chars): ${text.slice(0, 200)}`);
+    }
+    const obj = payload as { status?: string; data?: string };
+    const html = obj?.data ?? '';
+    const results = parseKeywordRows(html);
+    return {
+      status: obj?.status ?? 'unknown',
+      query: input.query,
+      category: input.category,
+      locationId,
+      languageId,
+      results,
+    };
+  }
+
+  private socialHeaders(): Record<string, string> {
+    return {
+      Accept: 'application/json, text/javascript, */*; q=0.01',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+      Origin: this.baseUrl,
+      Referer: `${this.baseUrl}/`,
+      'Sec-Ch-Ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"macOS"',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-site',
+      'User-Agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+      'X-CSRF-TOKEN': this.token,
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+  }
+
   // -------- HTTP plumbing --------
 
-  private async postMultipart(path: string, form: FormData, opts: { referer?: string } = {}): Promise<Response> {
+  private async postMultipart(path: string, form: FormData, opts: { referer?: string } = {}): Promise<HttpResponse> {
     await this.ensurePrimed();
     if (form.has('_token')) form.set('_token', this.token);
     const headers = this.baseHeaders('multipart');
@@ -1216,7 +1442,7 @@ export class BpStrategistsClient {
     }
   }
 
-  private async getRaw(path: string): Promise<Response> {
+  private async getRaw(path: string): Promise<HttpResponse> {
     const res = await this.http.fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
       headers: this.baseHeaders('GET'),
@@ -1231,7 +1457,7 @@ export class BpStrategistsClient {
     return res.json() as Promise<T>;
   }
 
-  private async postRaw(path: string, body: URLSearchParams): Promise<Response> {
+  private async postRaw(path: string, body: URLSearchParams): Promise<HttpResponse> {
     await this.ensurePrimed();
     // _token field, if present, should reflect the current (possibly refreshed) CSRF.
     if (body.has('_token')) body.set('_token', this.token);
@@ -1272,7 +1498,7 @@ export class BpStrategistsClient {
     return h;
   }
 
-  private async assertOk(res: Response, path: string): Promise<void> {
+  private async assertOk(res: HttpResponse, path: string): Promise<void> {
     if (res.status >= 300 && res.status < 400) {
       throw new Error(
         `${path} → ${res.status} redirect to ${res.headers.get('location')}. Session cookie likely expired.`,
@@ -1285,7 +1511,7 @@ export class BpStrategistsClient {
   }
 
   /** Read Set-Cookie headers and update the jar, like a browser would. */
-  private absorbSetCookie(res: Response): void {
+  private absorbSetCookie(res: HttpResponse): void {
     // `getSetCookie` returns each Set-Cookie separately. Bun + Node 20+ support it.
     const lines = typeof (res.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie === 'function'
       ? (res.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
@@ -1321,6 +1547,65 @@ function parseOptions(html: string): GoogleAccountOption[] {
     const id = Number(m[1]);
     if (!Number.isFinite(id) || id === 0) continue;
     out.push({ id, label: m[2].trim() });
+  }
+  return out;
+}
+
+// The keyword explorer renders one <tr> per result with all the structured
+// data hung off `data-*` attributes on the row's hidden <input>. Section
+// headers (e.g. "Keywords you provided", "Keyword Ideas") come as their own
+// <tr class="default-tab"><td colspan="7">...</td></tr>. Note: `data-sv-trend`
+// is emitted UNQUOTED in the HTML (a server-side bug), so it needs a separate
+// regex that doesn't expect surrounding quotes.
+function parseKeywordRows(html: string): KeywordResult[] {
+  const COMPETITION: Record<string, KeywordCompetition> = {
+    '0': 'unknown',
+    '1': 'low',
+    '2': 'medium',
+    '3': 'high',
+  };
+  const out: KeywordResult[] = [];
+  let section = 'Keyword Ideas';
+  const trRe = /<tr\b([^>]*)>([\s\S]*?)<\/tr>/gi;
+  for (const tr of html.matchAll(trRe)) {
+    const attrs = tr[1];
+    const body = tr[2];
+    if (/class="[^"]*default-tab[^"]*"/i.test(attrs)) {
+      const label = body.replace(/<[^>]+>/g, '').trim();
+      if (label) section = label;
+      continue;
+    }
+    const inputMatch = body.match(/<input[^>]*class="[^"]*selectKeyword[^"]*"[^>]*>/i);
+    if (!inputMatch) continue;
+    const input = inputMatch[0];
+    const get = (name: string): string | null => {
+      const m = input.match(new RegExp(`${name}=["']([^"']+)["']`, 'i'));
+      return m ? m[1] : null;
+    };
+    const keyword = get('data-id');
+    if (!keyword) continue;
+    const trendMatch = input.match(/data-sv-trend=(\[[^\]]*\])/i);
+    let trend: KeywordTrendPoint[] = [];
+    if (trendMatch) {
+      try {
+        const parsed = JSON.parse(trendMatch[1]) as Array<{ year: number; month: number; monthly_search: number }>;
+        trend = parsed.map((p) => ({ year: p.year, month: p.month, monthlySearch: p.monthly_search }));
+      } catch {
+        // malformed trend payload — leave empty
+      }
+    }
+    out.push({
+      keyword,
+      section,
+      searchVolume: Number(get('data-searchvolume') ?? 0) || 0,
+      competition: COMPETITION[get('data-competition') ?? '0'] ?? 'unknown',
+      competitionIndex: Number(get('data-ci') ?? 0) || 0,
+      bidLow: Number(get('data-bidlow') ?? 0) || 0,
+      bidHigh: Number(get('data-bidhigh') ?? 0) || 0,
+      locationId: Number(get('data-location') ?? 0) || 0,
+      languageId: Number(get('data-language') ?? 0) || 0,
+      trend,
+    });
   }
   return out;
 }

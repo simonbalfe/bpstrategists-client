@@ -46,6 +46,7 @@ Tokens last roughly 24 hours. When tool calls 401, run `bun run login` again (no
 - **Google connections** — list every Google account connected, see what each is connected to (GA4 / Search Console / Ads / GMB).
 - **Integrations** — find the right GA4 account, GSC property, Ads account, GMB location to attach.
 - **GMB posting** — write a post (now or scheduled), upload images, attach a CTA button (`book`, `orderonline`, `buy`, `learnmore`, `signup`, `callnow`), list what's already on the calendar, delete a scheduled or published post.
+- **Keyword research** — seed a keyword or a domain/URL and get related keyword ideas with search volume, competition tier, CPC bid range, and 12-month trend. List supported locations and languages.
 - **Domain check** — verify a domain resolves before creating a campaign for it.
 
 ---
