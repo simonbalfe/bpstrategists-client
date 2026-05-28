@@ -472,6 +472,7 @@ server.tool(
     'Keyword research: seed a keyword and get related ideas with search volume, competition, CPC bid range, and a 12-month trend.',
     'Backs the dashboard\'s "Search by keyword" panel in Keyword Explorer.',
     'Use list_keyword_locations / list_keyword_languages to find ids. locationId 0 = Worldwide.',
+    'Returned `status`: "ok" = rows found; "no_data" = upstream has no match for this exact seed (try a different phrasing — do NOT retry); "error" = real failure (`message` carries upstream text).',
   ].join(' '),
   {
     query: z.string().min(1).describe('Seed keyword, e.g. "creator".'),
@@ -509,6 +510,7 @@ server.tool(
     'Keyword research from a URL/domain: enter a competitor or your own site and get the keywords it ranks for.',
     'Backs the dashboard\'s "Search by domain" panel in Keyword Explorer.',
     'Returns the same shape as search_keywords. locationId 0 = Worldwide.',
+    'Returned `status`: "ok" = rows found; "no_data" = no match (do NOT retry the same domain); "error" = real failure.',
   ].join(' '),
   {
     domain: z.string().min(1).describe('Domain or full URL, e.g. "creatorcrawl.com" or "https://example.com/blog".'),

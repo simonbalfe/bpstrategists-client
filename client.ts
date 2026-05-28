@@ -341,7 +341,15 @@ export type KeywordSearchInput = {
 };
 
 export type KeywordSearchResult = {
-  status: string;
+  /**
+   * "ok"      = rows returned.
+   * "no_data" = upstream (DataForSEO via the dashboard) has no data for this
+   *             exact seed in this location/language. Try a different seed.
+   * "error"   = real failure. `message` carries the upstream text.
+   */
+  status: 'ok' | 'no_data' | 'error' | string;
+  /** Upstream message when status is "no_data" or "error". */
+  message?: string;
   query: string;
   category: 'keyword' | 'domain';
   locationId: number;
@@ -1350,8 +1358,23 @@ export class BpStrategistsClient {
     const obj = payload as { status?: string; data?: string };
     const html = obj?.data ?? '';
     const results = parseKeywordRows(html);
+    const upstreamStatus = obj?.status ?? 'unknown';
+    const emptyStateMsg = extractEmptyStateMessage(html);
+    let status: string = upstreamStatus;
+    let message: string | undefined;
+    if (results.length === 0 && emptyStateMsg) {
+      // Dashboard wraps "no DataForSEO match" as status:"error" + empty-state
+      // HTML. Normalize so callers can distinguish "no data" from real failure.
+      status = 'no_data';
+      message = emptyStateMsg;
+    } else if (upstreamStatus === 'error') {
+      message = emptyStateMsg ?? (stripHtml(html).slice(0, 300) || undefined);
+    } else if (results.length > 0) {
+      status = 'ok';
+    }
     return {
-      status: obj?.status ?? 'unknown',
+      status,
+      ...(message ? { message } : {}),
       query: input.query,
       category: input.category,
       locationId,
@@ -1557,6 +1580,24 @@ function parseOptions(html: string): GoogleAccountOption[] {
 // <tr class="default-tab"><td colspan="7">...</td></tr>. Note: `data-sv-trend`
 // is emitted UNQUOTED in the HTML (a server-side bug), so it needs a separate
 // regex that doesn't expect surrounding quotes.
+// Dashboard renders a fixed empty-state row when DataForSEO has no match:
+//   <tr class='empty-section'>...<h5>Sorry, We could not find data...</h5>
+//   <p>Make sure you're not researching sensitive keywords...</p>...</tr>
+// Returns "<h5> — <p>" joined, or null if the HTML isn't an empty state.
+function extractEmptyStateMessage(html: string): string | null {
+  if (!/class=['"]empty-section['"]/i.test(html) && !/could not find data/i.test(html)) {
+    return null;
+  }
+  const h5 = html.match(/<h5[^>]*>([\s\S]*?)<\/h5>/i)?.[1];
+  const p = html.match(/<p[^>]*>([\s\S]*?)<\/p>/i)?.[1];
+  const parts = [h5, p].map((s) => (s ? stripHtml(s) : '')).filter(Boolean);
+  return parts.length ? parts.join(' — ') : 'No data for this keyword.';
+}
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function parseKeywordRows(html: string): KeywordResult[] {
   const COMPETITION: Record<string, KeywordCompetition> = {
     '0': 'unknown',
